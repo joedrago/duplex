@@ -184,6 +184,7 @@ impl Stream {
 
     pub async fn segment(self: &Arc<Self>, n: usize) -> Result<Bytes> {
         self.touch();
+        let t0 = Instant::now();
         {
             let mut s = self.shared.state.lock().unwrap();
             if n > s.last_requested_seg {
@@ -198,6 +199,7 @@ impl Stream {
             }
         }
         if self.should_restart(n) {
+            tracing::debug!(segment = n, "scrub: restarting pump");
             self.restart_at(n);
         }
         self.ensure_pump(n);
@@ -206,6 +208,10 @@ impl Stream {
             {
                 let s = self.shared.state.lock().unwrap();
                 if let Some(b) = s.segments.get(&n) {
+                    let elapsed = t0.elapsed();
+                    if elapsed.as_millis() > 100 {
+                        tracing::debug!(segment = n, elapsed = ?elapsed, "segment ready");
+                    }
                     return Ok(b.clone());
                 }
                 if let Some(e) = s.error.as_ref() {

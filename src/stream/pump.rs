@@ -58,6 +58,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
 
     if cfg.start_time > 0.0 {
         let ts = (cfg.start_time / av_q2d(video_time_base)) as i64;
+        let seek_t0 = std::time::Instant::now();
         unsafe {
             let ret = ffi::av_seek_frame(
                 input.as_mut_ptr(),
@@ -69,6 +70,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                 bail!("av_seek_frame failed: {ret}");
             }
         }
+        tracing::debug!(seek_ms = seek_t0.elapsed().as_millis(), start_time = cfg.start_time, "seek complete");
     }
 
     // Set up audio decoder + encoder + filter graph only when transcoding.
@@ -159,6 +161,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
     let video_out_tb = output.streams().get(video_out_idx as usize).unwrap().time_base;
     let audio_out_tb = output.streams().get(audio_out_idx as usize).unwrap().time_base;
 
+    let mut pkt_count: usize = 0;
     loop {
         // Backpressure: wait until consumer needs more.
         {
@@ -169,6 +172,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                 if ahead < LOOKAHEAD_SEGMENTS {
                     break;
                 }
+                tracing::debug!(leading_edge = edge, last_requested = s.last_requested_seg, ahead, "pump: backpressure wait");
                 s = shared.drain.wait(s).unwrap();
             }
             if s.should_stop {
@@ -184,6 +188,10 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
 
         let pkt_stream_idx = packet.stream_index as usize;
         if pkt_stream_idx == video_in_idx {
+            // Estimate PTS from DTS if unset, to avoid muxer warnings.
+            if unsafe { (*packet.as_ptr()).pts == ffi::AV_NOPTS_VALUE } {
+                unsafe { (*packet.as_mut_ptr()).pts = (*packet.as_ptr()).dts };
+            }
             packet.set_stream_index(video_out_idx);
             unsafe {
                 ffi::av_packet_rescale_ts(packet.as_mut_ptr(), video_time_base, video_out_tb);
@@ -213,6 +221,10 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                     bail!("interleaved_write_frame (audio): {e}");
                 }
             }
+        }
+        pkt_count += 1;
+        if pkt_count % 1000 == 0 {
+            tracing::debug!(packets = pkt_count, "pump: processing");
         }
     }
 
@@ -293,21 +305,29 @@ fn build_audio_chain(
         let mut src_ctx: AVFilterContextMut<'_> = graph
             .create_filter_context(&abuffer, &src_name, Some(&src_args))
             .context("create abuffer")?;
+        // Allocate (don't initialize) so we can set options first.
         let mut sink_ctx: AVFilterContextMut<'_> = graph
-            .create_filter_context(&abuffersink, &sink_name, None)
-            .context("create abuffersink")?;
+            .alloc_filter_context(&abuffersink, &sink_name)
+            .ok_or_else(|| anyhow!("failed to alloc abuffersink"))?;
+        // In ffmpeg 7+, sample_fmts and sample_rates are binary array options.
         sink_ctx
-            .opt_set(c"sample_fmts", c"fltp")
-            .context("sink sample_fmts")?;
+            .opt_set_array(c"sample_formats", 0, Some(&[ffi::AV_SAMPLE_FMT_FLTP as i32]), ffi::AV_OPT_TYPE_SAMPLE_FMT)
+            .context("sink sample_formats")?;
         sink_ctx
-            .opt_set(c"sample_rates", c"48000")
-            .context("sink sample_rates")?;
+            .opt_set_array(c"samplerates", 0, Some(&[48000i64]), ffi::AV_OPT_TYPE_INT64)
+            .context("sink samplerates")?;
+        let mut layout: ffi::AVChannelLayout = unsafe { std::mem::zeroed() };
+        unsafe { ffi::av_channel_layout_default(&mut layout, 2) };
         sink_ctx
-            .opt_set(c"channel_layouts", c"stereo")
+            .opt_set_array(c"channel_layouts", 0, Some(&[layout]), ffi::AV_OPT_TYPE_CHLAYOUT)
             .context("sink channel_layouts")?;
+        // Match sink frame size to encoder's expected frame size.
+        let encoder_frame_size = unsafe { (*encoder.as_ptr()).frame_size } as u32;
+        sink_ctx.buffersink_set_frame_size(encoder_frame_size);
+        sink_ctx.init_str(None).context("init abuffersink")?;
 
         let filter_spec = CString::new(
-            "pan=stereo|FL=1.0*FL+0.707*FC+0.707*SL+0.707*BL|FR=1.0*FR+0.707*FC+0.707*SR+0.707*BR,aresample=async=1",
+            "pan=stereo|FL=1.0*FL+0.707*FC+0.707*SL+0.707*BL|FR=1.0*FR+0.707*FC+0.707*SR+0.707*BR,aresample=async=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
         )?;
         let outputs = AVFilterInOut::new(&CString::new("in")?, &mut src_ctx, 0);
         let inputs = AVFilterInOut::new(&CString::new("out")?, &mut sink_ctx, 0);
@@ -483,7 +503,12 @@ fn describe_ch_layout(layout: &rsmpeg::avutil::AVChannelLayoutRef<'_>) -> Result
     if n < 0 {
         bail!("av_channel_layout_describe failed: {n}");
     }
-    let bytes: Vec<u8> = buf[..n as usize].iter().map(|b| *b as u8).collect();
+    let n = n as usize;
+    if n == 0 {
+        bail!("av_channel_layout_describe returned empty string");
+    }
+    // n includes the null terminator; slice it off so CString::new doesn't reject the input
+    let bytes: Vec<u8> = buf[..n - 1].iter().map(|b| *b as u8).collect();
     Ok(CString::new(bytes).context("layout describe → CString")?)
 }
 
@@ -501,10 +526,13 @@ fn sample_fmt_name(sample_fmt: i32) -> Result<CString> {
 struct SegmentWriter {
     shared: Arc<Shared>,
     next_seg: usize,
+    start_seg: usize,
     init_done: bool,
+    first_seg_logged: bool,
     pre_init_buf: Vec<u8>,
     pending_moof: Option<Vec<u8>>,
     scratch: Vec<u8>,
+    start_instant: std::time::Instant,
 }
 
 impl SegmentWriter {
@@ -512,10 +540,13 @@ impl SegmentWriter {
         Self {
             shared,
             next_seg: start_seg,
+            start_seg,
             init_done: false,
+            first_seg_logged: false,
             pre_init_buf: Vec::with_capacity(64 * 1024),
             pending_moof: None,
             scratch: Vec::new(),
+            start_instant: std::time::Instant::now(),
         }
     }
 
@@ -547,11 +578,17 @@ impl SegmentWriter {
                     if !self.init_done && !self.pre_init_buf.is_empty() {
                         s.init_segment = Some(Bytes::from(std::mem::take(&mut self.pre_init_buf)));
                         self.init_done = true;
+                        tracing::debug!(init_ms = self.start_instant.elapsed().as_millis(), "init segment ready");
                     }
                     s.segments.insert(self.next_seg, Bytes::from(combined));
                     s.leading_edge = Some(self.next_seg);
+                    let seg = self.next_seg;
                     self.next_seg += 1;
                     drop(s);
+                    if !self.first_seg_logged && seg == self.start_seg {
+                        tracing::debug!(segment = seg, first_seg_ms = self.start_instant.elapsed().as_millis(), "first segment ready");
+                        self.first_seg_logged = true;
+                    }
                     self.shared.new_data.notify_waiters();
                 }
             }
