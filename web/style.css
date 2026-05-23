@@ -1,198 +1,258 @@
 :root {
-  --bg: #0d0f12;
-  --panel: #161a20;
-  --fg: #e8ecf1;
-  --muted: #8b95a3;
-  --accent: #6cb6ff;
-  --bad: #ff6b6b;
-  --good: #5dd28a;
+    --bg: #0d0f12;
+    --panel: #161a20;
+    --fg: #e8ecf1;
+    --muted: #8b95a3;
+    --accent: #6cb6ff;
+    --bad: #ff6b6b;
+    --good: #5dd28a;
 }
 
-* { box-sizing: border-box; }
+* {
+    box-sizing: border-box;
+}
 
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font:
+        15px/1.45 -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Helvetica,
+        Arial,
+        sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 header {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1.25rem;
-  background: var(--panel);
-  flex-shrink: 0;
-  z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    background: var(--panel);
+    flex-shrink: 0;
+    z-index: 10;
 }
 
 .home {
-  color: var(--accent);
-  text-decoration: none;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
 
 #crumbs {
-  display: flex;
-  gap: 0.35rem;
-  flex-wrap: wrap;
-  color: var(--muted);
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    color: var(--muted);
 }
-#crumbs a { color: var(--accent); text-decoration: none; }
-#crumbs span.sep { color: var(--muted); }
+#crumbs a {
+    color: var(--accent);
+    text-decoration: none;
+}
+#crumbs span.sep {
+    color: var(--muted);
+}
 
 main {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 1.25rem;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 1.25rem;
 }
 main:has(.player) {
-  padding: 0;
-  overflow: hidden;
+    padding: 0;
+    overflow: hidden;
 }
 
 .grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 0.75rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
 }
 
 .tile {
-  display: block;
-  padding: 1rem;
-  background: var(--panel);
-  border-radius: 8px;
-  color: var(--fg);
-  text-decoration: none;
-  transition: transform 0.05s ease;
+    display: block;
+    padding: 1rem;
+    background: var(--panel);
+    border-radius: 8px;
+    color: var(--fg);
+    text-decoration: none;
+    transition: transform 0.05s ease;
 }
-.tile:hover { transform: translateY(-1px); outline: 1px solid var(--accent); }
+.tile:hover {
+    transform: translateY(-1px);
+    outline: 1px solid var(--accent);
+}
 
-.tile .name { font-weight: 600; word-break: break-word; }
-.tile .meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.35rem; }
+.tile .name {
+    font-weight: 600;
+    word-break: break-word;
+}
+.tile .meta {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 0.35rem;
+}
 
-.tile.dir .name::before { content: "📁  "; }
-.tile.file .name::before { content: "🎬  "; }
+.tile.dir .name::before {
+    content: "📁  ";
+}
+.tile.file .name::before {
+    content: "🎬  ";
+}
 
 .badge {
-  display: inline-block;
-  padding: 0.05rem 0.4rem;
-  border-radius: 4px;
-  background: #2a313a;
-  color: var(--fg);
-  font-size: 0.75rem;
-  margin-left: 0.35rem;
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: #2a313a;
+    color: var(--fg);
+    font-size: 0.75rem;
+    margin-left: 0.35rem;
 }
-.badge.direct { background: #1d3a26; color: var(--good); }
-.badge.hls { background: #1d2e3a; color: var(--accent); }
-.badge.hls-audio-transcode { background: #2e1d3a; color: #c08aff; }
-.badge.unsupported { background: #3a1d22; color: var(--bad); }
+.badge.direct {
+    background: #1d3a26;
+    color: var(--good);
+}
+.badge.hls {
+    background: #1d2e3a;
+    color: var(--accent);
+}
+.badge.hls-audio-transcode {
+    background: #2e1d3a;
+    color: #c08aff;
+}
+.badge.unsupported {
+    background: #3a1d22;
+    color: var(--bad);
+}
 
 .player {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  width: 100%;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
 }
 
 .player-stage {
-  position: relative;
-  background: #000;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+    position: relative;
+    background: #000;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
 }
 .player-stage video {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
 }
 
 .player-controls {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 0.6rem 0.9rem;
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0));
-  opacity: 0;
-  transition: opacity 0.18s ease;
-  pointer-events: none;
-  z-index: 10;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 0.6rem 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0));
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    pointer-events: none;
+    z-index: 10;
 }
 .player-stage.show-controls .player-controls,
 .player-stage:hover .player-controls {
-  opacity: 1;
-  pointer-events: auto;
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .ctrl-btn {
-  background: transparent;
-  border: 0;
-  color: var(--fg);
-  cursor: pointer;
-  font-size: 1.05rem;
-  line-height: 1;
-  padding: 0.3rem 0.4rem;
-  border-radius: 4px;
+    background: transparent;
+    border: 0;
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 1.05rem;
+    line-height: 1;
+    padding: 0.3rem 0.4rem;
+    border-radius: 4px;
 }
-.ctrl-btn:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
-.ctrl-mute.muted { text-decoration: line-through; opacity: 0.6; }
+.ctrl-btn:hover {
+    color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+}
+.ctrl-mute.muted {
+    text-decoration: line-through;
+    opacity: 0.6;
+}
 
-.ctrl-scrub { flex: 1; cursor: pointer; min-width: 80px; }
-.ctrl-volume { width: 80px; cursor: pointer; }
+.ctrl-scrub {
+    flex: 1;
+    cursor: pointer;
+    min-width: 80px;
+}
+.ctrl-volume {
+    width: 80px;
+    cursor: pointer;
+}
 .ctrl-time {
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.85rem;
-  white-space: nowrap;
-  min-width: 9ch;
-  text-align: center;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    min-width: 9ch;
+    text-align: center;
 }
 
 .ctrl-subs,
 .ctrl-audio {
-  background: rgba(0, 0, 0, 0.5);
-  color: var(--fg);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 4px;
-  padding: 0.2rem 0.35rem;
-  font-size: 0.8rem;
-  max-width: 14ch;
+    background: rgba(0, 0, 0, 0.5);
+    color: var(--fg);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    padding: 0.2rem 0.35rem;
+    font-size: 0.8rem;
+    max-width: 14ch;
 }
 .controls select {
-  background: var(--panel);
-  color: var(--fg);
-  border: 1px solid #2a313a;
-  border-radius: 4px;
-  padding: 0.25rem 0.5rem;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid #2a313a;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
 }
 
-details { background: var(--panel); border-radius: 6px; padding: 0.5rem 0.75rem; }
-details pre { overflow: auto; color: var(--muted); font-size: 0.78rem; }
+details {
+    background: var(--panel);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+}
+details pre {
+    overflow: auto;
+    color: var(--muted);
+    font-size: 0.78rem;
+}
 
 .error {
-  padding: 1rem;
-  background: #3a1d22;
-  color: var(--bad);
-  border-radius: 6px;
+    padding: 1rem;
+    background: #3a1d22;
+    color: var(--bad);
+    border-radius: 6px;
 }
 
 /* Custom subtitle layer. Anchored to the stage so it sits in the
@@ -200,21 +260,24 @@ details pre { overflow: auto; color: var(--muted); font-size: 0.78rem; }
    percentage of the stage's actual rendered height (kept in sync by JS
    via the --stage-h custom property). */
 .cue-overlay {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 2%;
-  padding: 0 1rem;
-  text-align: center;
-  pointer-events: none;
-  z-index: 4;
-  color: #f5e6a8;
-  font-size: calc(var(--stage-h, 100vh) * 0.05);
-  line-height: 1.2;
-  white-space: pre-line;
-  text-shadow: 0 0 3px #000, 0 0 3px #000, 0 2px 4px rgba(0, 0, 0, 0.9);
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 2%;
+    padding: 0 1rem;
+    text-align: center;
+    pointer-events: none;
+    z-index: 4;
+    color: #f5e6a8;
+    font-size: calc(var(--stage-h, 100vh) * 0.05);
+    line-height: 1.2;
+    white-space: pre-line;
+    text-shadow:
+        0 0 3px #000,
+        0 0 3px #000,
+        0 2px 4px rgba(0, 0, 0, 0.9);
 }
 .player-stage.show-controls .cue-overlay,
 .player-stage:hover .cue-overlay {
-  bottom: calc(2% + 2.5rem);
+    bottom: calc(2% + 2.5rem);
 }

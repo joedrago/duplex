@@ -21,15 +21,15 @@ collide on basename will refuse to start — rename one on disk.
 
 ## Flags
 
-| Flag | Description | Default |
-|---|---|---|
-| `--library PATH` (repeatable, required) | Library root to serve. | — |
-| `--bind ADDR` | HTTP bind address. | `127.0.0.1:2345` |
-| `--log LEVEL` | `RUST_LOG`-style filter. | `info` |
-| `--ffmpeg PATH` | ffmpeg binary. | `ffmpeg` on `$PATH` |
-| `--ffprobe PATH` | ffprobe binary. | `ffprobe` on `$PATH` |
-| `--watch-debounce-ms N` | Filesystem watcher debounce window. | `300` |
-| `--dev-cors` | Permissive CORS (off by default). | `false` |
+| Flag                                    | Description                         | Default              |
+| --------------------------------------- | ----------------------------------- | -------------------- |
+| `--library PATH` (repeatable, required) | Library root to serve.              | —                    |
+| `--bind ADDR`                           | HTTP bind address.                  | `127.0.0.1:2345`     |
+| `--log LEVEL`                           | `RUST_LOG`-style filter.            | `info`               |
+| `--ffmpeg PATH`                         | ffmpeg binary.                      | `ffmpeg` on `$PATH`  |
+| `--ffprobe PATH`                        | ffprobe binary.                     | `ffprobe` on `$PATH` |
+| `--watch-debounce-ms N`                 | Filesystem watcher debounce window. | `300`                |
+| `--dev-cors`                            | Permissive CORS (off by default).   | `false`              |
 
 Every flag is also available as an env var prefixed `DUPLEX_` (e.g.
 `DUPLEX_BIND=0.0.0.0:2345`).
@@ -41,12 +41,12 @@ to stderr (journald-friendly).
 
 For every file, the server inspects probe + capability matrix and picks one of:
 
-| Decision | Server behaviour |
-|---|---|
-| `direct` | MP4-family container, codecs in capability matrix. Served via `/api/raw` with `Range`. |
-| `hls` | Container needs re-muxing; video copy, audio copy. fMP4 HLS via `/api/play/...`. |
-| `hls-audio-transcode` | Audio re-encoded to AAC stereo 192k; video still copy. |
-| `unsupported` | Video codec is outside the capability matrix. Surfaced in browse with a badge; no playback. |
+| Decision              | Server behaviour                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `direct`              | MP4-family container, codecs in capability matrix. Served via `/api/raw` with `Range`.      |
+| `hls`                 | Container needs re-muxing; video copy, audio copy. fMP4 HLS via `/api/play/...`.            |
+| `hls-audio-transcode` | Audio re-encoded to AAC stereo 192k; video still copy.                                      |
+| `unsupported`         | Video codec is outside the capability matrix. Surfaced in browse with a badge; no playback. |
 
 ## systemd
 
@@ -86,7 +86,7 @@ make list                       # list connected Apple TVs
 ```
 
 Building requires Xcode plus the tvOS platform installed
-(*Xcode > Settings > Components*).
+(_Xcode > Settings > Components_).
 
 ## Repo layout
 

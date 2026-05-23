@@ -1,20 +1,20 @@
 name: Duplex
 options:
-  bundleIdPrefix: com.duplex
-  deploymentTarget:
-    tvOS: "17.0"
+    bundleIdPrefix: com.duplex
+    deploymentTarget:
+        tvOS: "17.0"
 settings:
-  WEBVIEW_URL: http://localhost:2345
+    WEBVIEW_URL: http://localhost:2345
 targets:
-  Duplex:
-    type: application
-    platform: tvOS
-    sources:
-      - Sources
-    settings:
-      INFOPLIST_FILE: Sources/Info.plist
-      DEVELOPMENT_TEAM: $(DEVELOPMENT_TEAM)
-      PRODUCT_BUNDLE_IDENTIFIER: com.duplex.app
-      SWIFT_OBJC_BRIDGING_HEADER: Sources/BridgingHeader.h
-      CODE_SIGN_STYLE: Automatic
-      ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
+    Duplex:
+        type: application
+        platform: tvOS
+        sources:
+            - Sources
+        settings:
+            INFOPLIST_FILE: Sources/Info.plist
+            DEVELOPMENT_TEAM: $(DEVELOPMENT_TEAM)
+            PRODUCT_BUNDLE_IDENTIFIER: com.duplex.app
+            SWIFT_OBJC_BRIDGING_HEADER: Sources/BridgingHeader.h
+            CODE_SIGN_STYLE: Automatic
+            ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"

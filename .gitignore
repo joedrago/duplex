@@ -2,3 +2,5 @@
 tvos/Duplex.xcodeproj
 tvos/build
 tvos/DerivedData
+/node_modules
+package-lock.json

@@ -158,28 +158,28 @@ All API paths are versioned-less in v1. JSON for metadata, HLS/MP4 bytes for med
 
 ### Browsing & metadata
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/api/browse?path=Movies/Action` | One directory listing. Returns `{ path, entries: [{ name, kind, ... }] }`. No recursion. |
-| `GET` | `/api/file?path=...` | Probe info + capability decision for the configured client. Drives the player UI. |
-| `GET` | `/api/poster?path=...` | JPEG, extracted on demand from one frame near 10% into the file. Streamed from ffmpeg stdout. |
+| Method | Path                             | Notes                                                                                         |
+| ------ | -------------------------------- | --------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/browse?path=Movies/Action` | One directory listing. Returns `{ path, entries: [{ name, kind, ... }] }`. No recursion.      |
+| `GET`  | `/api/file?path=...`             | Probe info + capability decision for the configured client. Drives the player UI.             |
+| `GET`  | `/api/poster?path=...`           | JPEG, extracted on demand from one frame near 10% into the file. Streamed from ffmpeg stdout. |
 
 ### Direct play
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/api/raw?path=...` | Range-aware passthrough of the original file bytes. Only offered when the decision is DirectPlay. |
+| Method | Path                | Notes                                                                                             |
+| ------ | ------------------- | ------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/raw?path=...` | Range-aware passthrough of the original file bytes. Only offered when the decision is DirectPlay. |
 
 ### HLS
 
-| Method | Path | Notes |
-|---|---|---|
-| `GET` | `/api/play/<path>/master.m3u8` | Master playlist. Lists the single video rendition and one media playlist per compatible audio track + each text subtitle. |
-| `GET` | `/api/play/<path>/v/index.m3u8` | Video media playlist. EXTINF values derived from keyframe deltas. |
-| `GET` | `/api/play/<path>/v/<n>.m4s` | Video segment N. Spawns ffmpeg with `-ss <kf_time> -t <dur> -c:v copy -f mp4 -movflags +frag_keyframe+empty_moov+default_base_moof -`. Streams stdout to the response. |
-| `GET` | `/api/play/<path>/a/<idx>/index.m3u8` | Audio media playlist for source audio stream `idx`. |
-| `GET` | `/api/play/<path>/a/<idx>/<n>.m4s` | Audio segment. `-c:a copy` if compatible, otherwise `-c:a aac -ac 2 -b:a 192k`. |
-| `GET` | `/api/play/<path>/s/<idx>.vtt` | Subtitle stream `idx` as a single WebVTT file. (HLS technically wants subs segmented; we serve them as one segment covering the whole duration, which all players accept.) |
+| Method | Path                                  | Notes                                                                                                                                                                      |
+| ------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/play/<path>/master.m3u8`        | Master playlist. Lists the single video rendition and one media playlist per compatible audio track + each text subtitle.                                                  |
+| `GET`  | `/api/play/<path>/v/index.m3u8`       | Video media playlist. EXTINF values derived from keyframe deltas.                                                                                                          |
+| `GET`  | `/api/play/<path>/v/<n>.m4s`          | Video segment N. Spawns ffmpeg with `-ss <kf_time> -t <dur> -c:v copy -f mp4 -movflags +frag_keyframe+empty_moov+default_base_moof -`. Streams stdout to the response.     |
+| `GET`  | `/api/play/<path>/a/<idx>/index.m3u8` | Audio media playlist for source audio stream `idx`.                                                                                                                        |
+| `GET`  | `/api/play/<path>/a/<idx>/<n>.m4s`    | Audio segment. `-c:a copy` if compatible, otherwise `-c:a aac -ac 2 -b:a 192k`.                                                                                            |
+| `GET`  | `/api/play/<path>/s/<idx>.vtt`        | Subtitle stream `idx` as a single WebVTT file. (HLS technically wants subs segmented; we serve them as one segment covering the whole duration, which all players accept.) |
 
 The `<path>` segment in URLs is URL-encoded but preserves slashes so HLS players resolve relative segment URLs naturally.
 
@@ -192,6 +192,7 @@ On probe, we build a unified list of `SubtitleTrack { id, source, language, form
 - **Embedded image**: inventoried but flagged `format: image`; never offered, surfaced in `/api/file` only for diagnostics.
 
 When requested:
+
 - Sidecar `.vtt`: served as-is.
 - Sidecar `.srt`: piped through ffmpeg (`-f srt -i - -f webvtt -`) and streamed out. Fast.
 - Embedded text: `ffmpeg -i <file> -map 0:s:<idx> -f webvtt -`.
@@ -223,10 +224,10 @@ One HTML page, vanilla JS, hash routing. No framework. ~500 lines of JS goal.
 
 - `#/browse/<path>`: ask `/api/browse`, render a list. Folders are bigger tiles, files show poster + duration + a quality badge if HEVC.
 - `#/play/<path>`: ask `/api/file`, render a `<video>` plus controls:
-  - If DirectPlay: set `src` to `/api/raw?path=...`.
-  - Otherwise: load `/api/play/<path>/master.m3u8` via hls.js (or natively in Safari).
-  - Subtitle dropdown lists available WebVTT tracks; selecting one adds `<track src=...>` or swaps via hls.js subtitle API.
-  - Audio dropdown switches HLS audio rendition.
+    - If DirectPlay: set `src` to `/api/raw?path=...`.
+    - Otherwise: load `/api/play/<path>/master.m3u8` via hls.js (or natively in Safari).
+    - Subtitle dropdown lists available WebVTT tracks; selecting one adds `<track src=...>` or swaps via hls.js subtitle API.
+    - Audio dropdown switches HLS audio rendition.
 - A small "details" panel shows codecs, container, audio tracks, why playback is direct/remux/etc. Useful for debugging and for the user to learn what their library actually contains.
 
 Static assets are embedded into the Rust binary via `rust-embed` so deployment is one file plus ffmpeg.
@@ -253,17 +254,17 @@ Pattern follows `/Users/joe/work/whatsync/Dockerfile` (multi-stage). Two stages:
 
 ```yaml
 services:
-  duplex:
-    build: .
-    container_name: duplex
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    volumes:
-      - /path/to/library:/media:ro
-    environment:
-      DUPLEX_LIBRARY: /media
-      DUPLEX_BIND: 0.0.0.0:8080
+    duplex:
+        build: .
+        container_name: duplex
+        restart: unless-stopped
+        ports:
+            - "8080:8080"
+        volumes:
+            - /path/to/library:/media:ro
+        environment:
+            DUPLEX_LIBRARY: /media
+            DUPLEX_BIND: 0.0.0.0:8080
 ```
 
 ## Configuration
