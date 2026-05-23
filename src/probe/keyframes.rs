@@ -1,20 +1,20 @@
-//! Extract keyframe presentation timestamps from the video stream.
+//! Extract keyframe presentation timestamps for HLS segmentation.
 //!
-//! Cached per-file in memory. Used to compute HLS segment boundaries that
-//! coincide with keyframes (so we can `-c:v copy`).
+//! We read them from the container's own index (Matroska Cues for now) so
+//! the operation is cheap enough that no on-disk cache is needed. If the
+//! container won't give us an index quickly we return an error and the
+//! file simply won't play — by design we never fall back to walking
+//! every packet in the stream.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
-use tokio::process::Command;
+use anyhow::{anyhow, bail, Result};
 use tokio::sync::Mutex;
 
-use crate::probe::Key;
+use crate::probe::{matroska, Key};
 
 #[derive(Debug, Clone, Default)]
 pub struct Keyframes {
@@ -53,14 +53,12 @@ impl Keyframes {
 }
 
 pub struct KeyframeCache {
-    ffprobe: PathBuf,
     inner: Mutex<HashMap<Key, Arc<Keyframes>>>,
 }
 
 impl KeyframeCache {
-    pub fn new(ffprobe: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
-            ffprobe,
             inner: Mutex::new(HashMap::new()),
         }
     }
@@ -79,67 +77,57 @@ impl KeyframeCache {
                 return Ok(k.clone());
             }
         }
-        let kf = extract(&self.ffprobe, path, duration_hint).await?;
+        let kf = extract(path, duration_hint).await?;
         let arc = Arc::new(kf);
         let mut guard = self.inner.lock().await;
         guard.entry(key).or_insert_with(|| arc.clone());
         Ok(arc)
     }
-
 }
 
-#[derive(Debug, Deserialize)]
-struct Packet {
-    pts_time: Option<String>,
-    /// e.g. "K_" for a keyframe (discardable), "K__" with various trailing flags.
-    flags: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Wrap {
-    #[serde(default)]
-    packets: Vec<Packet>,
-}
-
-async fn extract(ffprobe: &Path, file: &Path, duration: f64) -> Result<Keyframes> {
-    let output = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_packets",
-            "-show_entries",
-            "packet=pts_time,flags",
-            "-print_format",
-            "json",
-        ])
-        .arg(file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| format!("spawn ffprobe keyframes for {}", file.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "ffprobe keyframes failed for {}: {}",
-            file.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+impl Default for KeyframeCache {
+    fn default() -> Self {
+        Self::new()
     }
-    let wrap: Wrap = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("parse keyframe json for {}", file.display()))?;
-    let mut times: Vec<f64> = wrap
-        .packets
-        .into_iter()
-        .filter(|p| p.flags.as_deref().map(|f| f.contains('K')).unwrap_or(false))
-        .filter_map(|p| p.pts_time.and_then(|s| s.parse::<f64>().ok()))
-        .collect();
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+}
+
+async fn extract(file: &Path, duration: f64) -> Result<Keyframes> {
+    let ext = file
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let is_matroska = matches!(
+        ext.as_deref(),
+        Some("mkv") | Some("webm") | Some("mka") | Some("mk3d")
+    );
+    if !is_matroska {
+        bail!(
+            "no fast keyframe path for {} (extension {:?})",
+            file.display(),
+            ext.as_deref().unwrap_or("")
+        );
+    }
+
+    let p = file.to_path_buf();
+    let t0 = std::time::Instant::now();
+    let mut times = tokio::task::spawn_blocking(move || matroska::read_keyframe_times(&p))
+        .await
+        .map_err(|e| anyhow!("matroska parser panicked: {e}"))??;
+    let parse_ms = t0.elapsed().as_millis();
+    let raw_count = times.len();
     if times.first().map(|&t| t > 0.001).unwrap_or(true) {
         times.insert(0, 0.0);
     }
+    tracing::debug!(
+        file = %file.display(),
+        parse_ms,
+        raw_count,
+        final_count = times.len(),
+        first = times.first().copied().unwrap_or(0.0),
+        last = times.last().copied().unwrap_or(0.0),
+        duration_hint = duration,
+        "matroska cues parsed",
+    );
     Ok(Keyframes {
         times,
         duration: duration.max(0.0),

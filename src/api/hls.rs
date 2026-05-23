@@ -1,29 +1,41 @@
-//! HLS endpoints: master playlist, video/audio media playlists, init segment,
-//! and per-segment fMP4 streamed from ffmpeg stdout.
+//! HLS endpoints: a single combined-rendition fragmented MP4 stream per
+//! `(file, audio_idx, transcode)` triple, served from the StreamCache.
+//!
+//! URL shape:
+//!   /api/play/<vpath>/master.m3u8                  → master with one STREAM-INF
+//!   /api/play/<vpath>/index.m3u8                   → media playlist
+//!   /api/play/<vpath>/init.mp4                     → ftyp + moov
+//!   /api/play/<vpath>/<N>.m4s                      → moof + mdat fragment
+//!
+//! Audio track selection is via `?audio=<index>`. If absent, the first
+//! audio stream is used; if transcode is forced via probe, that's
+//! decided by the capability matrix at handler entry.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use serde::Deserialize;
 
 use crate::api::{vpath, AppState};
 use crate::capability::{self, Decision};
-use crate::ffmpeg;
 use crate::library::Node;
 use crate::probe::Probe;
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/play/{*tail}", get(dispatch))
+    Router::new().route("/api/play/{*tail}", get(dispatch))
 }
 
-/// Hand-rolled dispatcher: split the wildcard tail into the virtual file path
-/// and the HLS resource (master playlist / video|audio media playlist / init
-/// segment / numbered segment), look up the file, dispatch accordingly.
+#[derive(Deserialize, Default)]
+struct PlayQuery {
+    audio: Option<u32>,
+}
+
 async fn dispatch(
     State(state): State<AppState>,
     Path(tail): Path<String>,
+    Query(q): Query<PlayQuery>,
 ) -> axum::response::Response {
     let Some((vpath_raw, sub)) = split_vpath_and_sub(&tail) else {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
@@ -51,96 +63,162 @@ async fn dispatch(
         return (StatusCode::BAD_REQUEST, "file is not HLS-eligible").into_response();
     }
 
+    let audio_idx = match resolve_audio_idx(&probe, q.audio) {
+        Some(i) => i,
+        None => return (StatusCode::BAD_REQUEST, "no audio stream").into_response(),
+    };
+    let transcode = audio_needs_transcode(&probe, audio_idx, decision);
+
+    if sub == ["master.m3u8"] {
+        return master_playlist(&vp, &probe, decision, audio_idx).into_response();
+    }
+
+    let kf = match state
+        .keyframes
+        .get_or_extract(&file.abs_path, file.size, file.mtime, probe.duration_secs().unwrap_or(0.0))
+        .await
+    {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("keyframe extraction failed: {e:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let stream = state
+        .streams
+        .get_or_create(
+            file.abs_path.clone(),
+            crate::probe::Key::new(&file.abs_path, file.mtime, file.size),
+            kf.clone(),
+            audio_idx,
+            transcode,
+        )
+        .await;
+
     match sub.as_slice() {
-        ["master.m3u8"] => master_playlist(&vp, &probe, decision).into_response(),
-        ["v", "index.m3u8"] => video_playlist(&state, &file, &probe).await,
-        ["v", "init.mp4"] => init_segment_video(&state, &file, &probe).await,
-        ["v", seg] => segment_video(&state, &file, &probe, seg).await,
-        ["a", idx, "index.m3u8"] => audio_playlist(&state, &file, &probe, idx, decision).await,
-        ["a", idx, "init.mp4"] => init_segment_audio(&state, &file, &probe, idx, decision).await,
-        ["a", idx, seg] => segment_audio(&state, &file, &probe, idx, seg, decision).await,
+        ["index.m3u8"] => media_playlist(&vp, &kf).into_response(),
+        ["init.mp4"] => match stream.init_segment().await {
+            Ok(bytes) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "video/mp4")],
+                bytes,
+            )
+                .into_response(),
+            Err(e) => {
+                tracing::warn!("init segment failed: {e:#}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
+        [seg] => match parse_seg_index(seg) {
+            Some(n) => match stream.segment(n).await {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "video/mp4")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(e) => {
+                    tracing::warn!("segment {n} failed: {e:#}");
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            },
+            None => StatusCode::BAD_REQUEST.into_response(),
+        },
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-/// Split a wildcard tail into (virtual file path, sub-resource components).
-/// The sub-resource is one of: ["master.m3u8"], ["v","index.m3u8"], ["v","init.mp4"],
-/// ["v","<n>.m4s"], ["a","<idx>","index.m3u8"], etc.
 fn split_vpath_and_sub(tail: &str) -> Option<(&str, Vec<&str>)> {
-    // master.m3u8
-    if let Some(stripped) = tail.strip_suffix("/master.m3u8") {
-        return Some((stripped, vec!["master.m3u8"]));
-    }
-    // v/* (init, index, <n>.m4s)
-    for suffix in &["/v/init.mp4", "/v/index.m3u8"] {
+    for suffix in &["/master.m3u8", "/index.m3u8", "/init.mp4"] {
         if let Some(s) = tail.strip_suffix(suffix) {
-            let last = &suffix[1..]; // strip leading '/'
-            return Some((s, last.split('/').collect()));
+            return Some((s, vec![&suffix[1..]]));
         }
     }
-    if let Some(idx) = tail.rfind("/v/") {
-        let (left, right) = tail.split_at(idx);
-        let right = &right[3..]; // skip "/v/"
-        return Some((left, vec!["v", right]));
+    let idx = tail.rfind('/')?;
+    let (left, right) = tail.split_at(idx);
+    let right = &right[1..];
+    if right.ends_with(".m4s") {
+        Some((left, vec![right]))
+    } else {
+        None
     }
-    // a/<idx>/...
-    if let Some(idx) = tail.rfind("/a/") {
-        let (left, right) = tail.split_at(idx);
-        let right = &right[3..]; // skip "/a/"
-        let mut parts: Vec<&str> = right.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let audio_idx = parts.remove(0);
-        let last = parts.remove(0);
-        return Some((left, vec!["a", audio_idx, last]));
-    }
-    None
 }
 
-fn master_playlist(vpath: &str, probe: &Probe, decision: Decision) -> impl IntoResponse {
+fn resolve_audio_idx(probe: &Probe, requested: Option<u32>) -> Option<u32> {
+    if let Some(idx) = requested {
+        if probe.audio_streams().any(|s| s.index == idx) {
+            return Some(idx);
+        }
+        return None;
+    }
+    probe.audio_streams().next().map(|s| s.index)
+}
+
+fn audio_needs_transcode(probe: &Probe, audio_idx: u32, decision: Decision) -> bool {
+    if matches!(decision, Decision::HlsAudioTranscode) {
+        return true;
+    }
+    let caps = capability::default_caps();
+    let Some(stream) = probe.streams.iter().find(|s| s.index == audio_idx) else {
+        return true;
+    };
+    !stream
+        .codec_name
+        .as_deref()
+        .map(|c| caps.audio_codecs.contains(c))
+        .unwrap_or(false)
+}
+
+fn master_playlist(
+    vpath: &str,
+    probe: &Probe,
+    decision: Decision,
+    audio_idx: u32,
+) -> impl IntoResponse {
     let enc = vpath::encode(vpath);
+    let video_codec = probe.video_codec().unwrap_or("avc1");
+    let bandwidth = bandwidth_estimate(probe, decision);
+    let res = match (
+        probe.video_stream().and_then(|v| v.width),
+        probe.video_stream().and_then(|v| v.height),
+    ) {
+        (Some(w), Some(h)) => format!(",RESOLUTION={w}x{h}"),
+        _ => String::new(),
+    };
+    let codec_attr = codec_string_for(video_codec);
     let mut s = String::new();
     s.push_str("#EXTM3U\n");
     s.push_str("#EXT-X-VERSION:7\n");
     s.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
-
-    // Audio renditions: one group, one entry per audio stream.
-    let audios: Vec<_> = probe.audio_streams().collect();
-    for (i, a) in audios.iter().enumerate() {
-        let lang = a
-            .tags
-            .as_ref()
-            .and_then(|t| t.get("language"))
-            .cloned()
-            .unwrap_or_else(|| "und".to_string());
-        let title = a
-            .tags
-            .as_ref()
-            .and_then(|t| t.get("title"))
-            .cloned()
-            .unwrap_or_else(|| {
-                a.codec_name.clone().unwrap_or_else(|| format!("track {}", a.index))
-            });
-        let default = if i == 0 { "YES" } else { "NO" };
-        s.push_str(&format!(
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"{title}\",LANGUAGE=\"{lang}\",DEFAULT={default},AUTOSELECT=YES,URI=\"/api/play/{enc}/a/{idx}/index.m3u8\"\n",
-            title = title.replace('"', "'"),
-            idx = a.index,
-        ));
-    }
-
-    let video_codec = probe.video_codec().unwrap_or("avc1");
-    let bandwidth = bandwidth_estimate(probe, decision);
-    let res = match (probe.video_stream().and_then(|v| v.width), probe.video_stream().and_then(|v| v.height)) {
-        (Some(w), Some(h)) => format!(",RESOLUTION={w}x{h}"),
-        _ => String::new(),
-    };
-    let codec_attr = codec_string_for(video_codec, decision);
     s.push_str(&format!(
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codec_attr}\"{res},AUDIO=\"aud\"\n",
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codec_attr}\"{res}\n"
     ));
-    s.push_str(&format!("/api/play/{enc}/v/index.m3u8\n"));
+    s.push_str(&format!("/api/play/{enc}/index.m3u8?audio={audio_idx}\n"));
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+        s,
+    )
+}
+
+fn media_playlist(vpath: &str, kf: &crate::probe::keyframes::Keyframes) -> impl IntoResponse {
+    let enc = vpath::encode(vpath);
+    let segments = kf.segments();
+    let target = kf.target_duration();
+
+    let mut s = String::new();
+    s.push_str("#EXTM3U\n");
+    s.push_str("#EXT-X-VERSION:7\n");
+    s.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
+    s.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+    s.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
+    s.push_str(&format!("#EXT-X-MAP:URI=\"/api/play/{enc}/init.mp4\"\n"));
+    for (i, (_start, dur)) in segments.iter().enumerate() {
+        s.push_str(&format!("#EXTINF:{:.3},\n", dur));
+        s.push_str(&format!("/api/play/{enc}/{i}.m4s\n"));
+    }
+    s.push_str("#EXT-X-ENDLIST\n");
 
     (
         StatusCode::OK,
@@ -149,19 +227,13 @@ fn master_playlist(vpath: &str, probe: &Probe, decision: Decision) -> impl IntoR
     )
 }
 
-fn codec_string_for(video_codec: &str, decision: Decision) -> String {
-    // Best-effort CODECS string. hls.js + Safari are lenient if this is loose,
-    // but it must include valid AAC if any audio is transcoded.
+fn codec_string_for(video_codec: &str) -> String {
     let v = match video_codec {
-        "h264" => "avc1.4d401f", // baseline-ish; OK if probe doesn't give us a profile
+        "h264" => "avc1.4d401f",
         "hevc" => "hvc1.1.6.L120.90",
         other => other,
     };
-    let a = match decision {
-        Decision::HlsAudioTranscode => "mp4a.40.2",
-        _ => "mp4a.40.2",
-    };
-    format!("{v},{a}")
+    format!("{v},mp4a.40.2")
 }
 
 fn bandwidth_estimate(probe: &Probe, _decision: Decision) -> u64 {
@@ -173,251 +245,6 @@ fn bandwidth_estimate(probe: &Probe, _decision: Decision) -> u64 {
         .unwrap_or(5_000_000)
 }
 
-async fn video_playlist(
-    state: &AppState,
-    file: &crate::library::File,
-    probe: &Probe,
-) -> axum::response::Response {
-    let duration = probe.duration_secs().unwrap_or(0.0);
-    let kf = match state
-        .keyframes
-        .get_or_extract(&file.abs_path, file.size, file.mtime, duration)
-        .await
-    {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!("keyframe extraction failed: {e:#}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let segments = kf.segments();
-    let target = kf.target_duration();
-
-    let Some(vp) = state.library.vpath_for(&file.abs_path) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let enc = vpath::encode(&vp);
-
-    let mut s = String::new();
-    s.push_str("#EXTM3U\n");
-    s.push_str("#EXT-X-VERSION:7\n");
-    s.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
-    s.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
-    s.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
-    s.push_str(&format!("#EXT-X-MAP:URI=\"/api/play/{enc}/v/init.mp4\"\n"));
-    for (i, (_start, dur)) in segments.iter().enumerate() {
-        s.push_str(&format!("#EXTINF:{:.3},\n", dur));
-        s.push_str(&format!("/api/play/{enc}/v/{i}.m4s\n"));
-    }
-    s.push_str("#EXT-X-ENDLIST\n");
-
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-        s,
-    )
-        .into_response()
-}
-
-async fn audio_playlist(
-    state: &AppState,
-    file: &crate::library::File,
-    probe: &Probe,
-    idx_str: &str,
-    decision: Decision,
-) -> axum::response::Response {
-    let Ok(idx) = idx_str.parse::<u32>() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if probe.audio_streams().all(|s| s.index != idx) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let duration = probe.duration_secs().unwrap_or(0.0);
-    let kf = match state
-        .keyframes
-        .get_or_extract(&file.abs_path, file.size, file.mtime, duration)
-        .await
-    {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!("keyframe extraction failed: {e:#}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let segments = kf.segments();
-    let target = kf.target_duration();
-    let _ = decision;
-
-    let Some(vp) = state.library.vpath_for(&file.abs_path) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let enc = vpath::encode(&vp);
-
-    let mut s = String::new();
-    s.push_str("#EXTM3U\n");
-    s.push_str("#EXT-X-VERSION:7\n");
-    s.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
-    s.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
-    s.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
-    s.push_str(&format!(
-        "#EXT-X-MAP:URI=\"/api/play/{enc}/a/{idx}/init.mp4\"\n"
-    ));
-    for (i, (_start, dur)) in segments.iter().enumerate() {
-        s.push_str(&format!("#EXTINF:{:.3},\n", dur));
-        s.push_str(&format!("/api/play/{enc}/a/{idx}/{i}.m4s\n"));
-    }
-    s.push_str("#EXT-X-ENDLIST\n");
-
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-        s,
-    )
-        .into_response()
-}
-
-async fn init_segment_video(
-    state: &AppState,
-    file: &crate::library::File,
-    _probe: &Probe,
-) -> axum::response::Response {
-    match ffmpeg::init_segment_video(&state.cfg.ffmpeg, &file.abs_path).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "video/mp4")],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::warn!("init video failed: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-async fn init_segment_audio(
-    state: &AppState,
-    file: &crate::library::File,
-    probe: &Probe,
-    idx_str: &str,
-    decision: Decision,
-) -> axum::response::Response {
-    let Ok(idx) = idx_str.parse::<u32>() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let Some(stream) = probe.streams.iter().find(|s| s.index == idx) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let transcode = needs_audio_transcode(stream, decision);
-    match ffmpeg::init_segment_audio(&state.cfg.ffmpeg, &file.abs_path, idx, transcode).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "video/mp4")],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::warn!("init audio failed: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-async fn segment_video(
-    state: &AppState,
-    file: &crate::library::File,
-    probe: &Probe,
-    seg: &str,
-) -> axum::response::Response {
-    let Some(n) = parse_seg_index(seg) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let duration = probe.duration_secs().unwrap_or(0.0);
-    let kf = match state
-        .keyframes
-        .get_or_extract(&file.abs_path, file.size, file.mtime, duration)
-        .await
-    {
-        Ok(k) => k,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let segments = kf.segments();
-    let Some(&(start, dur)) = segments.get(n) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    match ffmpeg::segment_video(&state.cfg.ffmpeg, &file.abs_path, start, dur).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "video/mp4")],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::warn!("segment video failed: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-async fn segment_audio(
-    state: &AppState,
-    file: &crate::library::File,
-    probe: &Probe,
-    idx_str: &str,
-    seg: &str,
-    decision: Decision,
-) -> axum::response::Response {
-    let Ok(idx) = idx_str.parse::<u32>() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let Some(stream) = probe.streams.iter().find(|s| s.index == idx) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(n) = parse_seg_index(seg) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let duration = probe.duration_secs().unwrap_or(0.0);
-    let kf = match state
-        .keyframes
-        .get_or_extract(&file.abs_path, file.size, file.mtime, duration)
-        .await
-    {
-        Ok(k) => k,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let segments = kf.segments();
-    let Some(&(start, dur)) = segments.get(n) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let transcode = needs_audio_transcode(stream, decision);
-    match ffmpeg::segment_audio(&state.cfg.ffmpeg, &file.abs_path, idx, start, dur, transcode).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "video/mp4")],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::warn!("segment audio failed: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-fn needs_audio_transcode(stream: &crate::probe::Stream, decision: Decision) -> bool {
-    if matches!(decision, Decision::HlsAudioTranscode) {
-        return true;
-    }
-    let caps = capability::default_caps();
-    !stream
-        .codec_name
-        .as_deref()
-        .map(|c| caps.audio_codecs.contains(c))
-        .unwrap_or(false)
-}
-
 fn parse_seg_index(seg: &str) -> Option<usize> {
-    let stem = seg.strip_suffix(".m4s")?;
-    stem.parse().ok()
+    seg.strip_suffix(".m4s")?.parse().ok()
 }

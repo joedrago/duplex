@@ -11,12 +11,14 @@ mod config;
 mod ffmpeg;
 mod library;
 mod probe;
+mod stream;
 
 use crate::api::AppState;
 use crate::config::Cli;
 use crate::library::Library;
 use crate::probe::keyframes::KeyframeCache;
 use crate::probe::ProbeCache;
+use crate::stream::StreamCache;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,12 +45,15 @@ async fn main() -> Result<()> {
     library::watcher::spawn(library.clone(), cli.watch_debounce_ms)?;
 
     let probe = Arc::new(ProbeCache::new(cli.ffprobe.clone()));
-    let keyframes = Arc::new(KeyframeCache::new(cli.ffprobe.clone()));
+    let keyframes = Arc::new(KeyframeCache::new());
+    let streams = Arc::new(StreamCache::new(cli.ffmpeg.clone()));
+    streams.clone().spawn_sweeper();
 
     let state = AppState {
         library,
         probe,
         keyframes,
+        streams,
         cfg: Arc::new(cli.clone()),
     };
     let app = api::router(state);

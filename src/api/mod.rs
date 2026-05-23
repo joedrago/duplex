@@ -8,6 +8,7 @@ use crate::config::Cli;
 use crate::library::Library;
 use crate::probe::keyframes::KeyframeCache;
 use crate::probe::ProbeCache;
+use crate::stream::StreamCache;
 
 pub mod browse;
 pub mod file;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub library: Library,
     pub probe: Arc<ProbeCache>,
     pub keyframes: Arc<KeyframeCache>,
+    pub streams: Arc<StreamCache>,
     pub cfg: Arc<Cli>,
 }
 

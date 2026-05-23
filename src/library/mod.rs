@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -156,21 +156,6 @@ impl Library {
         self.inner.store(Arc::new(new_tree));
     }
 
-    /// Find which root a given absolute path belongs to, and the virtual path
-    /// (root-name/...) relative to it. Returns None if no root contains it.
-    pub fn vpath_for(&self, abs: &Path) -> Option<String> {
-        for root in self.roots.iter() {
-            if let Ok(rel) = abs.strip_prefix(&root.path) {
-                let mut out = root.name.clone();
-                for c in rel.components() {
-                    out.push('/');
-                    out.push_str(&c.as_os_str().to_string_lossy());
-                }
-                return Some(out);
-            }
-        }
-        None
-    }
 }
 
 fn clone_tree(t: &Tree) -> Tree {

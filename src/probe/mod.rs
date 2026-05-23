@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 pub mod keyframes;
+pub mod matroska;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Key {
