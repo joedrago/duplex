@@ -92,12 +92,35 @@ main {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  position: relative;
 }
 .player video {
   width: 100%;
   max-height: 70vh;
   background: #000;
   border-radius: 6px;
+}
+
+.player-loading {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: min(70vh, 100%);
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 2.5rem;
+  pointer-events: none;
+  z-index: 5;
+}
+.player-loading.show { display: flex; }
+.player-loading-text {
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--fg);
+  font-size: 0.9rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
 }
 
 .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
@@ -118,4 +141,15 @@ details pre { overflow: auto; color: var(--muted); font-size: 0.78rem; }
   background: #3a1d22;
   color: var(--bad);
   border-radius: 6px;
+}
+
+video::cue {
+  font-size: 115%;
+  color: #f5e6a8;
+  background: transparent;
+  text-shadow: 0 0 3px #000, 0 0 3px #000, 0 2px 4px rgba(0, 0, 0, 0.9);
+}
+
+video:fullscreen::cue {
+  font-size: 5vh;
 }

@@ -157,7 +157,11 @@ async function renderPlay(path) {
 
   const video = el("video", { controls: true, playsInline: true, autoplay: true });
 
-  const wrap = el("div", { className: "player" }, video);
+  const loadingText = el("div", { className: "player-loading-text" }, "loading…");
+  const loadingOverlay = el("div", { className: "player-loading" }, loadingText);
+  attachLoadingOverlay(video, loadingOverlay, loadingText);
+
+  const wrap = el("div", { className: "player" }, video, loadingOverlay);
 
   // Subtitle dropdown — sidecar + embedded text tracks.
   const subOpts = [el("option", { value: "" }, "subtitles: off")];
@@ -213,12 +217,54 @@ async function renderPlay(path) {
   });
 }
 
+// Show "loading…" with elapsed-time feedback whenever the video is buffering.
+// Hides on `playing`; shows on `loadstart` / `waiting` / `stalled`. The text
+// upgrades after a few seconds so a long wait reads as "still working" rather
+// than a hung spinner.
+function attachLoadingOverlay(video, overlay, textNode) {
+  let timer = null;
+  let startedAt = 0;
+
+  const show = () => {
+    overlay.classList.add("show");
+    if (timer) return;
+    startedAt = performance.now();
+    const tick = () => {
+      const elapsed = (performance.now() - startedAt) / 1000;
+      if (elapsed < 3) {
+        textNode.textContent = "loading…";
+      } else if (elapsed < 15) {
+        textNode.textContent = `indexing… (${elapsed.toFixed(0)}s)`;
+      } else {
+        textNode.textContent = `still indexing — large file (${elapsed.toFixed(0)}s)`;
+      }
+    };
+    tick();
+    timer = setInterval(tick, 500);
+  };
+  const hide = () => {
+    overlay.classList.remove("show");
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  show();
+  video.addEventListener("playing", hide);
+  video.addEventListener("waiting", show);
+  video.addEventListener("stalled", show);
+  video.addEventListener("error", hide);
+}
+
 function detailsBlock(info) {
-  const details = el("details", null,
+  if (!new URLSearchParams(window.location.search).has("debug")) {
+    return document.createDocumentFragment();
+  }
+  return el("details", null,
     el("summary", null, `${info.decision} — ${info.path}`),
     el("pre", null, JSON.stringify(info.probe, null, 2)),
   );
-  return details;
 }
 
 function render() {
