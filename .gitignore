@@ -4,3 +4,9 @@ tvos/build
 tvos/DerivedData
 /node_modules
 package-lock.json
+
+# Personal test-corpus listings cite real files in the operator's
+# library; keep them out of the repo.
+/TEST_CORPUS.md
+/catalog.jsonl
+/scripts/catalog.jsonl

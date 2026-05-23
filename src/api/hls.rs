@@ -50,7 +50,11 @@ async fn dispatch(
     let file = f.clone();
     drop(tree);
 
-    let probe = match state.probe.get_or_probe(&file.abs_path, file.size, file.mtime).await {
+    let probe = match state
+        .probe
+        .get_or_probe(&file.abs_path, file.size, file.mtime)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("probe failed: {e:#}");
@@ -75,7 +79,12 @@ async fn dispatch(
 
     let kf = match state
         .keyframes
-        .get_or_extract(&file.abs_path, file.size, file.mtime, probe.duration_secs().unwrap_or(0.0))
+        .get_or_extract(
+            &file.abs_path,
+            file.size,
+            file.mtime,
+            probe.duration_secs().unwrap_or(0.0),
+        )
         .await
     {
         Ok(k) => k,
@@ -102,12 +111,9 @@ async fn dispatch(
 
     match sub.as_slice() {
         ["init.mp4"] => match stream.init_segment().await {
-            Ok(bytes) => (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "video/mp4")],
-                bytes,
-            )
-                .into_response(),
+            Ok(bytes) => {
+                (StatusCode::OK, [(header::CONTENT_TYPE, "video/mp4")], bytes).into_response()
+            }
             Err(e) => {
                 tracing::warn!("init segment failed: {e:#}");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -115,12 +121,9 @@ async fn dispatch(
         },
         [seg] => match parse_seg_index(seg) {
             Some(n) => match stream.segment(n).await {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "video/mp4")],
-                    bytes,
-                )
-                    .into_response(),
+                Ok(bytes) => {
+                    (StatusCode::OK, [(header::CONTENT_TYPE, "video/mp4")], bytes).into_response()
+                }
                 Err(e) => {
                     tracing::warn!("segment {n} failed: {e:#}");
                     StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -205,7 +208,11 @@ fn master_playlist(
     )
 }
 
-fn media_playlist(vpath: &str, kf: &crate::probe::keyframes::Keyframes, audio_idx: u32) -> impl IntoResponse {
+fn media_playlist(
+    vpath: &str,
+    kf: &crate::probe::keyframes::Keyframes,
+    audio_idx: u32,
+) -> impl IntoResponse {
     let enc = vpath::encode(vpath);
     let segments = kf.segments();
     let target = kf.target_duration();

@@ -16,7 +16,12 @@ pub struct Cli {
     pub libraries: Vec<PathBuf>,
 
     /// Address to bind the HTTP server.
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:2345", env = "DUPLEX_BIND")]
+    #[arg(
+        long,
+        value_name = "ADDR",
+        default_value = "127.0.0.1:2345",
+        env = "DUPLEX_BIND"
+    )]
     pub bind: SocketAddr,
 
     /// Log level (trace/debug/info/warn/error) or any RUST_LOG-style filter.
@@ -24,11 +29,21 @@ pub struct Cli {
     pub log: String,
 
     /// Path to the ffmpeg binary.
-    #[arg(long, value_name = "PATH", default_value = "ffmpeg", env = "DUPLEX_FFMPEG")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ffmpeg",
+        env = "DUPLEX_FFMPEG"
+    )]
     pub ffmpeg: PathBuf,
 
     /// Path to the ffprobe binary.
-    #[arg(long, value_name = "PATH", default_value = "ffprobe", env = "DUPLEX_FFPROBE")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "ffprobe",
+        env = "DUPLEX_FFPROBE"
+    )]
     pub ffprobe: PathBuf,
 
     /// Filesystem-watcher debounce window, in milliseconds.

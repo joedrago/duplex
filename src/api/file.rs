@@ -61,10 +61,7 @@ pub struct Urls {
     pub master: Option<String>,
 }
 
-pub async fn file(
-    State(state): State<AppState>,
-    Query(q): Query<FileQuery>,
-) -> impl IntoResponse {
+pub async fn file(State(state): State<AppState>, Query(q): Query<FileQuery>) -> impl IntoResponse {
     let Some(vp) = vpath::normalize(&q.path) else {
         return (axum::http::StatusCode::BAD_REQUEST, "invalid path").into_response();
     };
@@ -135,7 +132,10 @@ pub async fn file(
         sidecars: f.sidecars.clone(),
         embedded_subs: embedded,
         audio_tracks,
-        urls: Urls { raw: raw_url, master: master_url },
+        urls: Urls {
+            raw: raw_url,
+            master: master_url,
+        },
     })
     .into_response()
 }

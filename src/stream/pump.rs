@@ -47,10 +47,9 @@ pub(crate) fn run(cfg: Config, shared: Arc<Shared>) {
 }
 
 fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
-    let mut input = AVFormatContextInput::open(&CString::new(
-        cfg.file.to_string_lossy().as_bytes(),
-    )?)
-    .context("open input")?;
+    let mut input =
+        AVFormatContextInput::open(&CString::new(cfg.file.to_string_lossy().as_bytes())?)
+            .context("open input")?;
 
     let (video_in_idx, audio_in_idx) = pick_streams(&input, cfg.audio_idx)?;
     let video_time_base = input.streams().get(video_in_idx).unwrap().time_base;
@@ -70,7 +69,11 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                 bail!("av_seek_frame failed: {ret}");
             }
         }
-        tracing::debug!(seek_ms = seek_t0.elapsed().as_millis(), start_time = cfg.start_time, "seek complete");
+        tracing::debug!(
+            seek_ms = seek_t0.elapsed().as_millis(),
+            start_time = cfg.start_time,
+            "seek complete"
+        );
     }
 
     // Set up audio decoder + encoder + filter graph only when transcoding.
@@ -148,9 +151,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
 
     let opts = AVDictionary::new(
         &CString::new("movflags")?,
-        &CString::new(
-            "+empty_moov+delay_moov+frag_keyframe+default_base_moof+omit_tfhd_offset",
-        )?,
+        &CString::new("+empty_moov+delay_moov+frag_keyframe+default_base_moof+omit_tfhd_offset")?,
         0,
     );
     let mut opts_slot = Some(opts);
@@ -158,8 +159,16 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
         .write_header(&mut opts_slot)
         .context("write_header")?;
 
-    let video_out_tb = output.streams().get(video_out_idx as usize).unwrap().time_base;
-    let audio_out_tb = output.streams().get(audio_out_idx as usize).unwrap().time_base;
+    let video_out_tb = output
+        .streams()
+        .get(video_out_idx as usize)
+        .unwrap()
+        .time_base;
+    let audio_out_tb = output
+        .streams()
+        .get(audio_out_idx as usize)
+        .unwrap()
+        .time_base;
 
     let mut pkt_count: usize = 0;
     loop {
@@ -172,7 +181,12 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                 if ahead < LOOKAHEAD_SEGMENTS {
                     break;
                 }
-                tracing::debug!(leading_edge = edge, last_requested = s.last_requested_seg, ahead, "pump: backpressure wait");
+                tracing::debug!(
+                    leading_edge = edge,
+                    last_requested = s.last_requested_seg,
+                    ahead,
+                    "pump: backpressure wait"
+                );
                 s = shared.drain.wait(s).unwrap();
             }
             if s.should_stop {
@@ -201,13 +215,7 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
             }
         } else if pkt_stream_idx == audio_in_idx {
             if let Some(chain) = audio_chain.as_mut() {
-                process_audio_transcode(
-                    chain,
-                    &packet,
-                    &mut output,
-                    audio_out_idx,
-                    audio_out_tb,
-                )?;
+                process_audio_transcode(chain, &packet, &mut output, audio_out_idx, audio_out_tb)?;
             } else {
                 packet.set_stream_index(audio_out_idx);
                 unsafe {
@@ -246,10 +254,7 @@ struct AudioChain {
     sink_name: CString,
 }
 
-fn build_audio_chain(
-    input: &AVFormatContextInput,
-    audio_in_idx: usize,
-) -> Result<AudioChain> {
+fn build_audio_chain(input: &AVFormatContextInput, audio_in_idx: usize) -> Result<AudioChain> {
     let in_stream = input.streams().get(audio_in_idx).unwrap();
     let src_time_base = in_stream.time_base;
     let in_cp = in_stream.codecpar();
@@ -257,7 +262,9 @@ fn build_audio_chain(
     let decoder_codec = AVCodec::find_decoder(in_cp.codec_id)
         .ok_or_else(|| anyhow!("no decoder for codec id {:?}", in_cp.codec_id))?;
     let mut decoder = AVCodecContext::new(&decoder_codec);
-    decoder.apply_codecpar(&in_cp).context("apply audio codecpar")?;
+    decoder
+        .apply_codecpar(&in_cp)
+        .context("apply audio codecpar")?;
     unsafe {
         (*decoder.as_mut_ptr()).pkt_timebase = src_time_base;
     }
@@ -283,7 +290,7 @@ fn build_audio_chain(
 
     let in_ch_layout_desc = describe_ch_layout(&in_cp.ch_layout())?;
     let in_sample_rate = in_cp.sample_rate;
-    let in_sample_fmt = in_cp.format as i32;
+    let in_sample_fmt = in_cp.format;
     let in_sample_fmt_name = sample_fmt_name(in_sample_fmt)?;
     let src_args = CString::new(format!(
         "sample_rate={}:sample_fmt={}:channel_layout={}:time_base={}/{}",
@@ -294,8 +301,8 @@ fn build_audio_chain(
         src_time_base.den,
     ))?;
 
-    let abuffer = AVFilter::get_by_name(c"abuffer")
-        .ok_or_else(|| anyhow!("abuffer filter missing"))?;
+    let abuffer =
+        AVFilter::get_by_name(c"abuffer").ok_or_else(|| anyhow!("abuffer filter missing"))?;
     let abuffersink = AVFilter::get_by_name(c"abuffersink")
         .ok_or_else(|| anyhow!("abuffersink filter missing"))?;
 
@@ -311,7 +318,12 @@ fn build_audio_chain(
             .ok_or_else(|| anyhow!("failed to alloc abuffersink"))?;
         // In ffmpeg 7+, sample_fmts and sample_rates are binary array options.
         sink_ctx
-            .opt_set_array(c"sample_formats", 0, Some(&[ffi::AV_SAMPLE_FMT_FLTP as i32]), ffi::AV_OPT_TYPE_SAMPLE_FMT)
+            .opt_set_array(
+                c"sample_formats",
+                0,
+                Some(&[ffi::AV_SAMPLE_FMT_FLTP]),
+                ffi::AV_OPT_TYPE_SAMPLE_FMT,
+            )
             .context("sink sample_formats")?;
         sink_ctx
             .opt_set_array(c"samplerates", 0, Some(&[48000i64]), ffi::AV_OPT_TYPE_INT64)
@@ -319,7 +331,12 @@ fn build_audio_chain(
         let mut layout: ffi::AVChannelLayout = unsafe { std::mem::zeroed() };
         unsafe { ffi::av_channel_layout_default(&mut layout, 2) };
         sink_ctx
-            .opt_set_array(c"channel_layouts", 0, Some(&[layout]), ffi::AV_OPT_TYPE_CHLAYOUT)
+            .opt_set_array(
+                c"channel_layouts",
+                0,
+                Some(&[layout]),
+                ffi::AV_OPT_TYPE_CHLAYOUT,
+            )
             .context("sink channel_layouts")?;
         // Match sink frame size to encoder's expected frame size.
         let encoder_frame_size = unsafe { (*encoder.as_ptr()).frame_size } as u32;
@@ -354,10 +371,13 @@ fn process_audio_transcode(
     audio_out_idx: i32,
     audio_out_tb: ffi::AVRational,
 ) -> Result<()> {
-    chain.decoder.send_packet(Some(packet)).map_err(|e| match e {
-        RsmpegError::DecoderFullError | RsmpegError::DecoderFlushedError => anyhow!("{e}"),
-        other => anyhow!("send_packet: {other}"),
-    })?;
+    chain
+        .decoder
+        .send_packet(Some(packet))
+        .map_err(|e| match e {
+            RsmpegError::DecoderFullError | RsmpegError::DecoderFlushedError => anyhow!("{e}"),
+            other => anyhow!("send_packet: {other}"),
+        })?;
     drain_decoder(chain, output, audio_out_idx, audio_out_tb)
 }
 
@@ -407,7 +427,10 @@ fn pump_filter_to_encoder(
                 Err(e) => bail!("buffersink_get_frame: {e}"),
             }
         };
-        chain.encoder.send_frame(Some(&frame)).map_err(|e| anyhow!("{e}"))?;
+        chain
+            .encoder
+            .send_frame(Some(&frame))
+            .map_err(|e| anyhow!("{e}"))?;
         drain_encoder(chain, output, audio_out_idx, audio_out_tb)?;
     }
     Ok(())
@@ -494,11 +517,7 @@ fn av_q2d(q: ffi::AVRational) -> f64 {
 fn describe_ch_layout(layout: &rsmpeg::avutil::AVChannelLayoutRef<'_>) -> Result<CString> {
     let mut buf = [0i8; 256];
     let n = unsafe {
-        ffi::av_channel_layout_describe(
-            layout.as_ptr(),
-            buf.as_mut_ptr() as *mut _,
-            buf.len(),
-        )
+        ffi::av_channel_layout_describe(layout.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len())
     };
     if n < 0 {
         bail!("av_channel_layout_describe failed: {n}");
@@ -509,7 +528,7 @@ fn describe_ch_layout(layout: &rsmpeg::avutil::AVChannelLayoutRef<'_>) -> Result
     }
     // n includes the null terminator; slice it off so CString::new doesn't reject the input
     let bytes: Vec<u8> = buf[..n - 1].iter().map(|b| *b as u8).collect();
-    Ok(CString::new(bytes).context("layout describe → CString")?)
+    CString::new(bytes).context("layout describe → CString")
 }
 
 fn sample_fmt_name(sample_fmt: i32) -> Result<CString> {
@@ -578,7 +597,10 @@ impl SegmentWriter {
                     if !self.init_done && !self.pre_init_buf.is_empty() {
                         s.init_segment = Some(Bytes::from(std::mem::take(&mut self.pre_init_buf)));
                         self.init_done = true;
-                        tracing::debug!(init_ms = self.start_instant.elapsed().as_millis(), "init segment ready");
+                        tracing::debug!(
+                            init_ms = self.start_instant.elapsed().as_millis(),
+                            "init segment ready"
+                        );
                     }
                     s.segments.insert(self.next_seg, Bytes::from(combined));
                     s.leading_edge = Some(self.next_seg);
@@ -586,7 +608,11 @@ impl SegmentWriter {
                     self.next_seg += 1;
                     drop(s);
                     if !self.first_seg_logged && seg == self.start_seg {
-                        tracing::debug!(segment = seg, first_seg_ms = self.start_instant.elapsed().as_millis(), "first segment ready");
+                        tracing::debug!(
+                            segment = seg,
+                            first_seg_ms = self.start_instant.elapsed().as_millis(),
+                            "first segment ready"
+                        );
                         self.first_seg_logged = true;
                     }
                     self.shared.new_data.notify_waiters();

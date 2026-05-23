@@ -61,9 +61,15 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(cli.bind).await?;
     tracing::info!(addr = %cli.bind, "listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Race the server against the shutdown signal rather than using
+    // `with_graceful_shutdown`, which waits for every in-flight connection
+    // (browser keep-alives, pending segment fetches) to close before
+    // returning. Dropping the serve future on Ctrl-C kills idle and
+    // in-flight connections together so the process exits immediately.
+    tokio::select! {
+        res = axum::serve(listener, app) => res?,
+        _ = shutdown_signal() => {}
+    }
     Ok(())
 }
 

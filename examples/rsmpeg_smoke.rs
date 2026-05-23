@@ -18,7 +18,9 @@ fn main() -> anyhow::Result<()> {
     while let Some(p) = input.read_packet()? {
         packets += 1;
         bytes += p.size as u64;
-        if packets >= 200 { break; }
+        if packets >= 200 {
+            break;
+        }
     }
     eprintln!("read {packets} packets, {bytes} bytes");
     Ok(())

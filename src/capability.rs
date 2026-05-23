@@ -51,8 +51,12 @@ impl Decision {
 }
 
 pub fn decide(probe: &Probe, caps: &Capabilities) -> Decision {
-    let Some(v) = probe.video_stream() else { return Decision::Unsupported };
-    let Some(vc) = v.codec_name.as_deref() else { return Decision::Unsupported };
+    let Some(v) = probe.video_stream() else {
+        return Decision::Unsupported;
+    };
+    let Some(vc) = v.codec_name.as_deref() else {
+        return Decision::Unsupported;
+    };
     if !caps.video_codecs.contains(vc) {
         return Decision::Unsupported;
     }

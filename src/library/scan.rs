@@ -11,14 +11,18 @@ pub fn scan(lib: &Library) -> Tree {
         let mut root_dir = Dir::default();
         scan_dir(&root.path, &mut root_dir);
         attach_sidecars(&mut root_dir);
-        tree.root.children.insert(root.name.clone(), Node::Dir(root_dir));
+        tree.root
+            .children
+            .insert(root.name.clone(), Node::Dir(root_dir));
     }
     tree
 }
 
 /// Apply a single discovered path into the tree (used by the watcher).
 pub fn upsert_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
-    let Some((root, rel)) = resolve_relative(roots, abs) else { return; };
+    let Some((root, rel)) = resolve_relative(roots, abs) else {
+        return;
+    };
     let mut parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
     if parts.is_empty() {
         return;
@@ -61,7 +65,9 @@ pub fn upsert_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
     }
 
     if meta.is_dir() {
-        cur.children.entry(leaf).or_insert_with(|| Node::Dir(Dir::default()));
+        cur.children
+            .entry(leaf)
+            .or_insert_with(|| Node::Dir(Dir::default()));
     } else if meta.is_file() {
         let ext = extension_of(&leaf);
         let kind = classify(&ext);
@@ -83,7 +89,9 @@ pub fn upsert_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
 
 /// Remove a path from the tree if present.
 pub fn remove_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
-    let Some((root, rel)) = resolve_relative(roots, abs) else { return; };
+    let Some((root, rel)) = resolve_relative(roots, abs) else {
+        return;
+    };
     let mut parts: Vec<String> = rel
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
@@ -92,7 +100,9 @@ pub fn remove_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
         return;
     }
     let leaf = parts.pop().unwrap();
-    let Some(Node::Dir(root_branch)) = tree.root.children.get_mut(&root.name) else { return; };
+    let Some(Node::Dir(root_branch)) = tree.root.children.get_mut(&root.name) else {
+        return;
+    };
     let mut cur = root_branch;
     for part in &parts {
         let next = cur.children.get_mut(part);

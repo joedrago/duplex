@@ -171,7 +171,7 @@ fn find_seek_position(body: &[u8], target_id: u64) -> Option<u64> {
     None
 }
 
-fn find_binary_child<'a>(body: &'a [u8], target_id: u64) -> Option<&'a [u8]> {
+fn find_binary_child(body: &[u8], target_id: u64) -> Option<&[u8]> {
     let mut cur = body;
     while !cur.is_empty() {
         let (id, size, after) = read_header_bytes(cur)?;
@@ -197,9 +197,7 @@ fn find_video_track(body: &[u8]) -> Option<u64> {
             return None;
         }
         let (elem, rest) = after.split_at(size as usize);
-        if id == ID_TRACK_ENTRY
-            && find_uint_child(elem, ID_TRACK_TYPE) == Some(TRACK_TYPE_VIDEO)
-        {
+        if id == ID_TRACK_ENTRY && find_uint_child(elem, ID_TRACK_TYPE) == Some(TRACK_TYPE_VIDEO) {
             if let Some(num) = find_uint_child(elem, ID_TRACK_NUMBER) {
                 return Some(num);
             }
@@ -226,9 +224,10 @@ fn first_keyframe_per_cluster(body: &[u8], track: u64) -> Vec<u64> {
         }
         let (elem, rest) = after.split_at(size as usize);
         if id == ID_CUE_POINT {
-            if let (Some(time), Some(cluster_pos)) =
-                (find_uint_child(elem, ID_CUE_TIME), cue_cluster_for_track(elem, track))
-            {
+            if let (Some(time), Some(cluster_pos)) = (
+                find_uint_child(elem, ID_CUE_TIME),
+                cue_cluster_for_track(elem, track),
+            ) {
                 by_cluster
                     .entry(cluster_pos)
                     .and_modify(|t| {
@@ -254,9 +253,7 @@ fn cue_cluster_for_track(elem: &[u8], track: u64) -> Option<u64> {
             return None;
         }
         let (sub, rest) = after.split_at(size as usize);
-        if id == ID_CUE_TRACK_POSITIONS
-            && find_uint_child(sub, ID_CUE_TRACK) == Some(track)
-        {
+        if id == ID_CUE_TRACK_POSITIONS && find_uint_child(sub, ID_CUE_TRACK) == Some(track) {
             return find_uint_child(sub, ID_CUE_CLUSTER_POSITION);
         }
         cur = rest;
@@ -311,7 +308,11 @@ fn read_size(f: &mut File) -> Result<u64> {
         }
     }
     let bits = 7 * len as u32;
-    let all_ones: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let all_ones: u64 = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
     Ok(if val == all_ones { UNKNOWN_SIZE } else { val })
 }
 

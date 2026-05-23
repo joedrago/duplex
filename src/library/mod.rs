@@ -128,9 +128,15 @@ impl Library {
                 ));
             }
             if !canonical.is_dir() {
-                return Err(anyhow!("library path {} is not a directory", canonical.display()));
+                return Err(anyhow!(
+                    "library path {} is not a directory",
+                    canonical.display()
+                ));
             }
-            roots.push(Root { name, path: canonical });
+            roots.push(Root {
+                name,
+                path: canonical,
+            });
         }
         Ok(Self {
             roots: Arc::new(roots),
@@ -155,11 +161,12 @@ impl Library {
         f(&mut new_tree);
         self.inner.store(Arc::new(new_tree));
     }
-
 }
 
 fn clone_tree(t: &Tree) -> Tree {
-    Tree { root: clone_dir(&t.root) }
+    Tree {
+        root: clone_dir(&t.root),
+    }
 }
 
 fn clone_dir(d: &Dir) -> Dir {

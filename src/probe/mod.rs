@@ -149,7 +149,6 @@ impl ProbeCache {
         guard.entry(key).or_insert_with(|| arc.clone());
         Ok(arc)
     }
-
 }
 
 async fn run_ffprobe(ffprobe: &Path, file: &Path) -> Result<Probe> {

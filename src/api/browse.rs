@@ -51,11 +51,7 @@ pub async fn browse(
         match vpath::normalize(&q.path) {
             Some(v) => v,
             None => {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid path",
-                )
-                    .into_response();
+                return (axum::http::StatusCode::BAD_REQUEST, "invalid path").into_response();
             }
         }
     };

@@ -82,9 +82,15 @@ fn handle_event(lib: &Library, ev: &notify_debouncer_full::DebouncedEvent) {
     });
 }
 
-fn re_add_subtree(tree: &mut crate::library::Tree, roots: &[crate::library::Root], abs: &std::path::Path) {
+fn re_add_subtree(
+    tree: &mut crate::library::Tree,
+    roots: &[crate::library::Root],
+    abs: &std::path::Path,
+) {
     // Walk the subtree manually and upsert each file.
-    let Ok(read) = std::fs::read_dir(abs) else { return };
+    let Ok(read) = std::fs::read_dir(abs) else {
+        return;
+    };
     for entry in read.flatten() {
         let p = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
