@@ -1,0 +1,121 @@
+:root {
+  --bg: #0d0f12;
+  --panel: #161a20;
+  --fg: #e8ecf1;
+  --muted: #8b95a3;
+  --accent: #6cb6ff;
+  --bad: #ff6b6b;
+  --good: #5dd28a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.home {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+#crumbs {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  color: var(--muted);
+}
+#crumbs a { color: var(--accent); text-decoration: none; }
+#crumbs span.sep { color: var(--muted); }
+
+main {
+  padding: 1.25rem;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.tile {
+  display: block;
+  padding: 1rem;
+  background: var(--panel);
+  border-radius: 8px;
+  color: var(--fg);
+  text-decoration: none;
+  transition: transform 0.05s ease;
+}
+.tile:hover { transform: translateY(-1px); outline: 1px solid var(--accent); }
+
+.tile .name { font-weight: 600; word-break: break-word; }
+.tile .meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.35rem; }
+
+.tile.dir .name::before { content: "📁  "; }
+.tile.file .name::before { content: "🎬  "; }
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: #2a313a;
+  color: var(--fg);
+  font-size: 0.75rem;
+  margin-left: 0.35rem;
+}
+.badge.direct { background: #1d3a26; color: var(--good); }
+.badge.hls { background: #1d2e3a; color: var(--accent); }
+.badge.hls-audio-transcode { background: #2e1d3a; color: #c08aff; }
+.badge.unsupported { background: #3a1d22; color: var(--bad); }
+
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.player video {
+  width: 100%;
+  max-height: 70vh;
+  background: #000;
+  border-radius: 6px;
+}
+
+.controls { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+.controls label { color: var(--muted); font-size: 0.85rem; }
+.controls select {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid #2a313a;
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+}
+
+details { background: var(--panel); border-radius: 6px; padding: 0.5rem 0.75rem; }
+details pre { overflow: auto; color: var(--muted); font-size: 0.78rem; }
+
+.error {
+  padding: 1rem;
+  background: #3a1d22;
+  color: var(--bad);
+  border-radius: 6px;
+}
