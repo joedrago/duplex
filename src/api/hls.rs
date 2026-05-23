@@ -85,6 +85,10 @@ async fn dispatch(
         }
     };
 
+    if sub == ["index.m3u8"] {
+        return media_playlist(&vp, &kf, audio_idx).into_response();
+    }
+
     let stream = state
         .streams
         .get_or_create(
@@ -97,7 +101,6 @@ async fn dispatch(
         .await;
 
     match sub.as_slice() {
-        ["index.m3u8"] => media_playlist(&vp, &kf).into_response(),
         ["init.mp4"] => match stream.init_segment().await {
             Ok(bytes) => (
                 StatusCode::OK,
@@ -202,10 +205,11 @@ fn master_playlist(
     )
 }
 
-fn media_playlist(vpath: &str, kf: &crate::probe::keyframes::Keyframes) -> impl IntoResponse {
+fn media_playlist(vpath: &str, kf: &crate::probe::keyframes::Keyframes, audio_idx: u32) -> impl IntoResponse {
     let enc = vpath::encode(vpath);
     let segments = kf.segments();
     let target = kf.target_duration();
+    let q = format!("?audio={audio_idx}");
 
     let mut s = String::new();
     s.push_str("#EXTM3U\n");
@@ -213,10 +217,10 @@ fn media_playlist(vpath: &str, kf: &crate::probe::keyframes::Keyframes) -> impl 
     s.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
     s.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
     s.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
-    s.push_str(&format!("#EXT-X-MAP:URI=\"/api/play/{enc}/init.mp4\"\n"));
+    s.push_str(&format!("#EXT-X-MAP:URI=\"/api/play/{enc}/init.mp4{q}\"\n"));
     for (i, (_start, dur)) in segments.iter().enumerate() {
         s.push_str(&format!("#EXTINF:{:.3},\n", dur));
-        s.push_str(&format!("/api/play/{enc}/{i}.m4s\n"));
+        s.push_str(&format!("/api/play/{enc}/{i}.m4s{q}\n"));
     }
     s.push_str("#EXT-X-ENDLIST\n");
 

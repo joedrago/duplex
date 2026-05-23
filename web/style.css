@@ -167,7 +167,8 @@ main:has(.player) {
   text-align: center;
 }
 
-.ctrl-subs {
+.ctrl-subs,
+.ctrl-audio {
   background: rgba(0, 0, 0, 0.5);
   color: var(--fg);
   border: 1px solid rgba(255, 255, 255, 0.15);

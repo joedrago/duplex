@@ -27,6 +27,7 @@ pub struct FileResponse {
     pub probe: Option<Probe>,
     pub sidecars: Vec<Sidecar>,
     pub embedded_subs: Vec<EmbeddedSub>,
+    pub audio_tracks: Vec<AudioTrack>,
     pub urls: Urls,
 }
 
@@ -36,6 +37,15 @@ pub struct EmbeddedSub {
     pub codec: Option<String>,
     pub language: Option<String>,
     pub format: SubFormat,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AudioTrack {
+    pub index: u32,
+    pub codec: Option<String>,
+    pub language: Option<String>,
+    pub channels: Option<u32>,
+    pub channel_layout: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +110,17 @@ pub async fn file(
         });
     }
 
+    let audio_tracks = probe
+        .audio_streams()
+        .map(|s| AudioTrack {
+            index: s.index,
+            codec: s.codec_name.clone(),
+            language: s.tags.as_ref().and_then(|t| t.get("language").cloned()),
+            channels: s.channels,
+            channel_layout: s.channel_layout.clone(),
+        })
+        .collect();
+
     let enc = vpath::encode(&vp);
     let raw_url = matches!(decision, Decision::DirectPlay).then(|| format!("/api/raw?path={enc}"));
     let master_url = (!matches!(decision, Decision::DirectPlay | Decision::Unsupported))
@@ -113,6 +134,7 @@ pub async fn file(
         probe: Some((*probe).clone()),
         sidecars: f.sidecars.clone(),
         embedded_subs: embedded,
+        audio_tracks,
         urls: Urls { raw: raw_url, master: master_url },
     })
     .into_response()

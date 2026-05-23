@@ -169,6 +169,23 @@ async function renderPlay(path) {
   });
   const subSelect = el("select", { className: "ctrl-subs", title: "subtitles" }, ...subOpts);
 
+  // Audio track dropdown — only when HLS is in play and there's more than
+  // one track. Direct-play uses the raw file and the browser picks audio;
+  // we can't switch tracks server-side in that mode.
+  const audioTracks = info.audio_tracks ?? [];
+  const audioSelect = info.decision !== "direct" && audioTracks.length > 1
+    ? el(
+        "select",
+        { className: "ctrl-audio", title: "audio track" },
+        ...audioTracks.map((a, i) => {
+          const lang = a.language || `audio ${i + 1}`;
+          const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null);
+          const ch = chInfo ? ` (${chInfo})` : "";
+          return el("option", { value: a.index }, `${lang}${ch}`);
+        }),
+      )
+    : null;
+
   const playBtn = el("button", { className: "ctrl-btn ctrl-play", title: "play/pause" }, "▶");
   const scrub = el("input", { type: "range", className: "ctrl-scrub", min: "0", max: "100", step: "any", value: "0" });
   const timeDisplay = el("span", { className: "ctrl-time" }, "0:00 / 0:00");
@@ -179,28 +196,43 @@ async function renderPlay(path) {
   const controlBar = el(
     "div",
     { className: "player-controls" },
-    playBtn, scrub, timeDisplay, muteBtn, volumeSlider, subSelect, fsBtn,
+    playBtn, scrub, timeDisplay, muteBtn, volumeSlider, audioSelect, subSelect, fsBtn,
   );
 
   const stage = el("div", { className: "player-stage" }, video, cueOverlay, controlBar);
   const wrap = el("div", { className: "player" }, stage, detailsBlock(info));
   app.replaceChildren(wrap);
 
+  const masterUrlFor = (audioIdx) =>
+    `${info.urls.master}${audioIdx !== undefined ? `?audio=${audioIdx}` : ""}`;
+  const initialAudio = audioTracks[0]?.index;
+
   if (info.decision === "direct") {
     video.src = info.urls.raw;
+  } else if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls({ debug: false });
+    activeHls = hls;
+    hls.loadSource(masterUrlFor(initialAudio));
+    hls.attachMedia(video);
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = masterUrlFor(initialAudio);
   } else {
-    const master = info.urls.master;
-    if (window.Hls && window.Hls.isSupported()) {
-      const hls = new window.Hls({ debug: false });
-      activeHls = hls;
-      hls.loadSource(master);
-      hls.attachMedia(video);
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = master;
-    } else {
-      app.replaceChildren(el("div", { className: "error" }, "no HLS support in this browser"));
-      return;
-    }
+    app.replaceChildren(el("div", { className: "error" }, "no HLS support in this browser"));
+    return;
+  }
+
+  if (audioSelect && activeHls) {
+    audioSelect.addEventListener("change", () => {
+      const audioIdx = parseInt(audioSelect.value, 10);
+      const curTime = video.currentTime;
+      const wasPlaying = !video.paused;
+      activeHls.loadSource(masterUrlFor(audioIdx));
+      video.addEventListener("canplay", function onCanPlay() {
+        video.removeEventListener("canplay", onCanPlay);
+        video.currentTime = curTime;
+        if (wasPlaying) video.play();
+      });
+    });
   }
 
   attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn });
