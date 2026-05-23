@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
     let probe = Arc::new(ProbeCache::new(cli.ffprobe.clone()));
     let keyframes = Arc::new(KeyframeCache::new());
-    let streams = Arc::new(StreamCache::new(cli.ffmpeg.clone()));
+    let streams = Arc::new(StreamCache::new());
     streams.clone().spawn_sweeper();
 
     let state = AppState {
