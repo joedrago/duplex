@@ -1,20 +1,16 @@
 //! Minimal Matroska/WebM EBML reader.
 //!
-//! We want segment boundaries that ffmpeg's input-side `-ss` can cleanly
-//! cut at with stream-copy. That means cluster starts **whose first Block
-//! is a video keyframe** — files that interleave audio-only clusters
-//! between video clusters would otherwise hand us audio-cluster timestamps
-//! that ffmpeg can't seek to without rewinding to the previous video
-//! cluster, producing overlapping HLS segments and visible skip-backs.
+//! We need a list of times where ffmpeg's input-side `-ss <X>` can cleanly
+//! cut for stream-copy. Those are the **first-keyframe PTS of each cluster
+//! that contains video**, in the file's own Cues index — because ffmpeg's
+//! seek consults Cues by exact `CueTime`, and only times present in Cues
+//! seek precisely (any other value rounds *down* to the previous cue,
+//! which lands in the wrong cluster).
 //!
-//! We deliberately do not use the Cues index. Cues can list mid-cluster
-//! keyframes whose `-ss <CueTime>` likewise rewinds to the surrounding
-//! cluster start.
-//!
-//! The walk reads each Segment child's header, and for Clusters peeks
-//! just far enough to read the Cluster.Timestamp and the first Block's
-//! track+keyframe flag, then seeks past the rest of the cluster body.
-//! Block payload bytes are never read.
+//! Algorithm: walk Segment children, parse `Info > TimestampScale` and the
+//! full `Cues` body. For each video CuePoint, group by `CueClusterPosition`
+//! and keep the minimum CueTime per group — that's the cluster's first
+//! video keyframe.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -24,6 +20,10 @@ use anyhow::{anyhow, bail, Context, Result};
 
 const ID_EBML: u64 = 0x1A45DFA3;
 const ID_SEGMENT: u64 = 0x18538067;
+const ID_SEEK_HEAD: u64 = 0x114D9B74;
+const ID_SEEK: u64 = 0x4DBB;
+const ID_SEEK_ID: u64 = 0x53AB;
+const ID_SEEK_POSITION: u64 = 0x53AC;
 const ID_INFO: u64 = 0x1549A966;
 const ID_TIMESTAMP_SCALE: u64 = 0x2AD7B1;
 const ID_TRACKS: u64 = 0x1654AE6B;
@@ -31,23 +31,24 @@ const ID_TRACK_ENTRY: u64 = 0xAE;
 const ID_TRACK_NUMBER: u64 = 0xD7;
 const ID_TRACK_TYPE: u64 = 0x83;
 const ID_CLUSTER: u64 = 0x1F43B675;
-const ID_CLUSTER_TIMESTAMP: u64 = 0xE7;
-const ID_SIMPLE_BLOCK: u64 = 0xA3;
-const ID_BLOCK_GROUP: u64 = 0xA0;
-const ID_BLOCK: u64 = 0xA1;
-const ID_REFERENCE_BLOCK: u64 = 0xFB;
+const ID_CUES: u64 = 0x1C53BB6B;
+const ID_CUE_POINT: u64 = 0xBB;
+const ID_CUE_TIME: u64 = 0xB3;
+const ID_CUE_TRACK_POSITIONS: u64 = 0xB7;
+const ID_CUE_TRACK: u64 = 0xF7;
+const ID_CUE_CLUSTER_POSITION: u64 = 0xF1;
 const TRACK_TYPE_VIDEO: u64 = 1;
 
 const UNKNOWN_SIZE: u64 = u64::MAX;
 
-/// Hard cap on any single element body we'll buffer. Real Info elements
-/// are well under this; anything larger almost certainly means we've
-/// misparsed and would otherwise try to allocate the whole file.
+/// Hard cap on any single element body we'll buffer. Real Info / Cues
+/// elements are well under this; anything larger almost certainly means
+/// we've misparsed and would otherwise try to allocate the whole file.
 const MAX_ELEMENT_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Read sorted, deduped cluster-start times (in seconds) from a
-/// Matroska/WebM file. Every cluster starts with a keyframe, so these
-/// times are guaranteed ffmpeg-seekable boundaries.
+/// Read sorted, deduped video keyframe times (in seconds) from a
+/// Matroska/WebM file by reading its Cues index and taking the first
+/// CueTime per cluster.
 pub fn read_keyframe_times(path: &Path) -> Result<Vec<f64>> {
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
 
@@ -70,19 +71,30 @@ pub fn read_keyframe_times(path: &Path) -> Result<Vec<f64>> {
 
     let mut timestamp_scale: u64 = 1_000_000; // ns/tick; Matroska default
     let mut video_track: Option<u64> = None;
-    let mut cluster_ticks: Vec<u64> = Vec::new();
+    let mut cues_body: Option<Vec<u8>> = None;
+    let mut cues_offset: Option<u64> = None;
 
+    // Walk Segment children only until we hit a Cluster. Cues is usually at
+    // the end of the file; a SeekHead near the start tells us where, so we
+    // don't have to skip past every cluster body to find it.
     while f.stream_position()? < seg_end {
         let (id, size) = match read_element_header(&mut f) {
             Ok(v) => v,
             Err(_) => break,
         };
         if size == UNKNOWN_SIZE {
-            bail!("unknown-size top-level element 0x{:X}", id);
+            // Streamable cluster or similar — bail to the SeekHead-driven path below.
+            break;
         }
         let body_start = f.stream_position()?;
         let body_end = body_start.saturating_add(size);
         match id {
+            ID_SEEK_HEAD => {
+                let body = read_exact_n(&mut f, size)?;
+                if let Some(rel) = find_seek_position(&body, ID_CUES) {
+                    cues_offset = Some(seg_start.saturating_add(rel));
+                }
+            }
             ID_INFO => {
                 let body = read_exact_n(&mut f, size)?;
                 if let Some(ts) = find_uint_child(&body, ID_TIMESTAMP_SCALE) {
@@ -93,13 +105,15 @@ pub fn read_keyframe_times(path: &Path) -> Result<Vec<f64>> {
                 let body = read_exact_n(&mut f, size)?;
                 video_track = find_video_track(&body);
             }
+            ID_CUES => {
+                cues_body = Some(read_exact_n(&mut f, size)?);
+                break;
+            }
             ID_CLUSTER => {
-                if let Some(track) = video_track {
-                    if let Some(ts) = read_video_keyframe_cluster_ts(&mut f, body_end, track)? {
-                        cluster_ticks.push(ts);
-                    }
-                }
-                f.seek(SeekFrom::Start(body_end))?;
+                // Cluster data starts. Anything we still need (Cues, possibly
+                // Info/Tracks if the file is unusually ordered) must be
+                // reached via SeekHead.
+                break;
             }
             _ => {
                 f.seek(SeekFrom::Start(body_end))?;
@@ -107,18 +121,70 @@ pub fn read_keyframe_times(path: &Path) -> Result<Vec<f64>> {
         }
     }
 
-    let _ = video_track.ok_or_else(|| anyhow!("no video track in Tracks"))?;
-    if cluster_ticks.is_empty() {
-        bail!("no clusters whose first block is a video keyframe");
+    // If we didn't already capture Cues inline, jump to the offset SeekHead
+    // gave us.
+    if cues_body.is_none() {
+        let off = cues_offset.ok_or_else(|| anyhow!("no Cues element"))?;
+        f.seek(SeekFrom::Start(off))?;
+        let (id, size) = read_element_header(&mut f)?;
+        if id != ID_CUES {
+            bail!("SeekHead pointed to 0x{:X}, not Cues", id);
+        }
+        if size == UNKNOWN_SIZE {
+            bail!("Cues element has unknown size");
+        }
+        cues_body = Some(read_exact_n(&mut f, size)?);
     }
-    cluster_ticks.sort_unstable();
-    cluster_ticks.dedup();
+
+    let body = cues_body.expect("cues_body checked above");
+    let track = video_track.ok_or_else(|| anyhow!("no video track in Tracks"))?;
+    let mut min_per_cluster = first_keyframe_per_cluster(&body, track);
+    min_per_cluster.sort_unstable();
+    min_per_cluster.dedup();
 
     let scale_sec = timestamp_scale as f64 / 1_000_000_000.0;
-    Ok(cluster_ticks
+    Ok(min_per_cluster
         .into_iter()
         .map(|t| t as f64 * scale_sec)
         .collect())
+}
+
+/// Walk a SeekHead body and return the SeekPosition (relative to Segment
+/// data start) of the first Seek entry whose SeekID matches `target_id`.
+fn find_seek_position(body: &[u8], target_id: u64) -> Option<u64> {
+    let mut cur = body;
+    while !cur.is_empty() {
+        let (id, size, after) = read_header_bytes(cur)?;
+        if size as usize > after.len() {
+            return None;
+        }
+        let (elem, rest) = after.split_at(size as usize);
+        if id == ID_SEEK {
+            let seek_id_bytes = find_binary_child(elem, ID_SEEK_ID)?;
+            let seek_pos = find_uint_child(elem, ID_SEEK_POSITION)?;
+            if parse_uint(seek_id_bytes) == target_id {
+                return Some(seek_pos);
+            }
+        }
+        cur = rest;
+    }
+    None
+}
+
+fn find_binary_child<'a>(body: &'a [u8], target_id: u64) -> Option<&'a [u8]> {
+    let mut cur = body;
+    while !cur.is_empty() {
+        let (id, size, after) = read_header_bytes(cur)?;
+        if size as usize > after.len() {
+            return None;
+        }
+        let (elem, rest) = after.split_at(size as usize);
+        if id == target_id {
+            return Some(elem);
+        }
+        cur = rest;
+    }
+    None
 }
 
 /// Walk a Tracks element body and return the TrackNumber of the first
@@ -143,137 +209,59 @@ fn find_video_track(body: &[u8]) -> Option<u64> {
     None
 }
 
-/// Peek into a Cluster body: read its Timestamp, then find the first
-/// Block (skipping PrevSize/Position/etc), and return the cluster's
-/// timestamp only if that first Block is a video keyframe on the given
-/// track. Returns Ok(None) for audio-only clusters or anything we don't
-/// understand, so we just skip those instead of corrupting the segment
-/// list.
-fn read_video_keyframe_cluster_ts(
-    f: &mut File,
-    body_end: u64,
-    video_track: u64,
-) -> Result<Option<u64>> {
-    let pos = f.stream_position()?;
-    if pos >= body_end {
-        return Ok(None);
-    }
-    let (id, size) = read_element_header(f)?;
-    if id != ID_CLUSTER_TIMESTAMP || size == UNKNOWN_SIZE || size > 8 {
-        return Ok(None);
-    }
-    let mut tsbuf = [0u8; 8];
-    f.read_exact(&mut tsbuf[..size as usize])?;
-    let mut cluster_ts = 0u64;
-    for &b in &tsbuf[..size as usize] {
-        cluster_ts = (cluster_ts << 8) | b as u64;
-    }
-
-    while f.stream_position()? < body_end {
-        let (bid, bsize) = match read_element_header(f) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        if bsize == UNKNOWN_SIZE {
-            return Ok(None);
-        }
-        let bbody_start = f.stream_position()?;
-        let bbody_end = bbody_start.saturating_add(bsize);
-        match bid {
-            ID_SIMPLE_BLOCK => {
-                return Ok(simple_block_is_video_keyframe(f, bsize, video_track)?
-                    .then_some(cluster_ts));
-            }
-            ID_BLOCK_GROUP => {
-                let body = read_exact_n(f, bsize)?;
-                return Ok(block_group_is_video_keyframe(&body, video_track)
-                    .then_some(cluster_ts));
-            }
-            _ => {
-                f.seek(SeekFrom::Start(bbody_end))?;
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// SimpleBlock body layout: VINT(TrackNumber) + i16(rel_ts) + u8(flags)
-/// + frame_data. Flags bit 0x80 marks a keyframe. We read only the few
-/// header bytes; frame_data is skipped via seek.
-fn simple_block_is_video_keyframe(
-    f: &mut File,
-    block_size: u64,
-    video_track: u64,
-) -> Result<bool> {
-    let start = f.stream_position()?;
-    let end = start.saturating_add(block_size);
-    let mut first = [0u8; 1];
-    f.read_exact(&mut first)?;
-    let vint_len = (first[0].leading_zeros() + 1) as usize;
-    if vint_len == 0 || vint_len > 4 {
-        f.seek(SeekFrom::Start(end))?;
-        return Ok(false);
-    }
-    let mask: u8 = if vint_len >= 8 { 0 } else { 0xFFu8 >> vint_len };
-    let mut track = (first[0] & mask) as u64;
-    let mut rest = [0u8; 3];
-    if vint_len > 1 {
-        f.read_exact(&mut rest[..vint_len - 1])?;
-        for &b in &rest[..vint_len - 1] {
-            track = (track << 8) | b as u64;
-        }
-    }
-    let mut tail = [0u8; 3]; // 2 bytes rel_ts + 1 byte flags
-    f.read_exact(&mut tail)?;
-    let flags = tail[2];
-    f.seek(SeekFrom::Start(end))?;
-    Ok(track == video_track && (flags & 0x80) != 0)
-}
-
-/// BlockGroup keyframe detection: a video block in a BlockGroup is a
-/// keyframe iff there is no ReferenceBlock child. We also need the inner
-/// Block's track number to match the video track.
-fn block_group_is_video_keyframe(body: &[u8], video_track: u64) -> bool {
-    let mut block_track: Option<u64> = None;
-    let mut has_reference = false;
+/// For each CuePoint in `body` whose CueTrackPositions references `track`,
+/// emit one (cluster_position, cue_time) pair. Then collapse to the
+/// minimum cue_time per cluster_position — that's the first-keyframe time
+/// for that cluster.
+fn first_keyframe_per_cluster(body: &[u8], track: u64) -> Vec<u64> {
+    use std::collections::HashMap;
+    let mut by_cluster: HashMap<u64, u64> = HashMap::new();
     let mut cur = body;
     while !cur.is_empty() {
         let Some((id, size, after)) = read_header_bytes(cur) else {
-            return false;
+            break;
         };
         if size as usize > after.len() {
-            return false;
+            break;
         }
         let (elem, rest) = after.split_at(size as usize);
-        match id {
-            ID_BLOCK => {
-                block_track = parse_block_track(elem);
+        if id == ID_CUE_POINT {
+            if let (Some(time), Some(cluster_pos)) =
+                (find_uint_child(elem, ID_CUE_TIME), cue_cluster_for_track(elem, track))
+            {
+                by_cluster
+                    .entry(cluster_pos)
+                    .and_modify(|t| {
+                        if time < *t {
+                            *t = time;
+                        }
+                    })
+                    .or_insert(time);
             }
-            ID_REFERENCE_BLOCK => {
-                has_reference = true;
-            }
-            _ => {}
         }
         cur = rest;
     }
-    block_track == Some(video_track) && !has_reference
+    by_cluster.into_values().collect()
 }
 
-fn parse_block_track(elem: &[u8]) -> Option<u64> {
-    let first = *elem.first()?;
-    if first == 0 {
-        return None;
+/// In a CuePoint body, find the CueClusterPosition associated with the
+/// CueTrackPositions for `track`. Returns None if no such position exists.
+fn cue_cluster_for_track(elem: &[u8], track: u64) -> Option<u64> {
+    let mut cur = elem;
+    while !cur.is_empty() {
+        let (id, size, after) = read_header_bytes(cur)?;
+        if size as usize > after.len() {
+            return None;
+        }
+        let (sub, rest) = after.split_at(size as usize);
+        if id == ID_CUE_TRACK_POSITIONS
+            && find_uint_child(sub, ID_CUE_TRACK) == Some(track)
+        {
+            return find_uint_child(sub, ID_CUE_CLUSTER_POSITION);
+        }
+        cur = rest;
     }
-    let len = (first.leading_zeros() + 1) as usize;
-    if len == 0 || len > 4 || elem.len() < len {
-        return None;
-    }
-    let mask: u8 = if len >= 8 { 0 } else { 0xFFu8 >> len };
-    let mut val = (first & mask) as u64;
-    for &b in &elem[1..len] {
-        val = (val << 8) | b as u64;
-    }
-    Some(val)
+    None
 }
 
 fn read_element_header(f: &mut File) -> Result<(u64, u64)> {
@@ -341,7 +329,6 @@ fn skip_bytes(f: &mut File, n: u64) -> Result<()> {
     f.seek(SeekFrom::Start(pos.saturating_add(n)))?;
     Ok(())
 }
-
 
 /// Find the first child with the given id and parse its body as a
 /// big-endian unsigned integer.

@@ -21,7 +21,11 @@ pub struct Capabilities {
 pub fn default_caps() -> Capabilities {
     Capabilities {
         video_codecs: ["h264", "hevc"].into_iter().collect(),
-        audio_codecs: ["aac", "ac3", "eac3"].into_iter().collect(),
+        // AAC-only for HLS-fMP4: ac3/eac3 in fragmented MP4 with `-c:a copy`
+        // hits ffmpeg muxer quirks ("codec frame size is not set") that
+        // produce init segments MSE rejects. Anything else gets transcoded
+        // to stereo AAC via the HlsAudioTranscode path.
+        audio_codecs: ["aac"].into_iter().collect(),
         direct_containers: ["mp4", "m4v", "mov"].into_iter().collect(),
     }
 }

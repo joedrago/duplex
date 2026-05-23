@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -244,11 +244,30 @@ impl Stream {
             .args(["-ss", &format!("{start_time:.6}")])
             .args(["-i"])
             .arg(&self.file)
+            // -copyts: keep input PTS so moof tfdt matches the segment's
+            // real global time (fixes hls.js oscillating between
+            // adjacent segments on a scrub-target lookup).
+            .args(["-copyts"])
             .args(["-map", "0:v:0"])
             .args(["-map", &format!("0:{}", self.audio_idx)])
             .args(["-c:v", "copy"]);
         if self.transcode {
-            cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "192k"]);
+            // Explicit 5.1→2.0 downmix in the filter graph (ITU-R BS.775
+            // coefficients, side channels treated like back channels) so
+            // the AAC encoder sees stereo input directly instead of doing
+            // an implicit downmix. Without this, surround sources land
+            // ~50-100ms ahead/behind video — likely the encoder's
+            // internal channel-conversion buffer slipping in only on
+            // the audio side. `aresample=async=1` after the downmix
+            // keeps audio aligned with the video clock for any further
+            // drift.
+            cmd.args([
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-af",
+                "pan=stereo|FL=1.0*FL+0.707*FC+0.707*SL+0.707*BL|FR=1.0*FR+0.707*FC+0.707*SR+0.707*BR,aresample=async=1",
+            ]);
         } else {
             cmd.args(["-c:a", "copy"]);
         }
@@ -279,16 +298,9 @@ impl Stream {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("ffmpeg stdout unavailable"))?;
-        let stderr = child.stderr.take();
-        if let Some(mut e) = stderr {
+        if let Some(stderr) = child.stderr.take() {
             let file = self.file.clone();
-            tokio::spawn(async move {
-                let mut buf = String::new();
-                let _ = e.read_to_string(&mut buf).await;
-                if !buf.trim().is_empty() {
-                    tracing::debug!(target: "ffmpeg", file = %file.display(), "stream stderr: {}", buf.trim());
-                }
-            });
+            tokio::spawn(stream_stderr(stderr, file));
         }
 
         // Replace any prior ffmpeg first: Drop kills the previous child + aborts its reader.
@@ -298,16 +310,49 @@ impl Stream {
         inner.leading_edge = None;
 
         let weak = Arc::downgrade(self);
+        let file_for_reader = self.file.clone();
         let reader = tokio::spawn(async move {
             if let Some(strong) = weak.upgrade() {
-                if let Err(e) = read_fragments(stdout, strong, start_seg).await {
-                    tracing::debug!(target: "ffmpeg", "fragment reader exited: {e:#}");
+                match read_fragments(stdout, strong.clone(), start_seg).await {
+                    Ok(()) => {
+                        let count = strong.inner.lock().await.segments.len();
+                        tracing::warn!(
+                            target: "ffmpeg",
+                            file = %file_for_reader.display(),
+                            segments_buffered = count,
+                            "fragment reader hit clean EOF (ffmpeg stdout closed)",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "ffmpeg",
+                            file = %file_for_reader.display(),
+                            "fragment reader error: {e:#}",
+                        );
+                    }
                 }
             }
         });
 
         inner.ffmpeg = Some(FfmpegHandle { child, reader });
         Ok(())
+    }
+}
+
+/// Pump ffmpeg's stderr line-by-line into tracing so we see warnings and
+/// errors as they happen, not at process EOF.
+async fn stream_stderr(stderr: ChildStderr, file: std::path::PathBuf) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if !line.trim().is_empty() {
+                    tracing::debug!(target: "ffmpeg", file = %file.display(), "stderr: {}", line);
+                }
+            }
+            Ok(None) => return,
+            Err(_) => return,
+        }
     }
 }
 
@@ -363,7 +408,13 @@ async fn read_fragments(
 }
 
 /// Read one top-level MP4 box from `reader`. Returns Ok(None) on clean EOF
-/// before any header byte is read; bubbles up errors on partial reads.
+/// before any header byte is read.
+///
+/// Handles three size encodings:
+///   * 32-bit size (1..=8 invalid; >= 8 normal)
+///   * size=1 → next 8 bytes hold the actual 64-bit size (header is 16 bytes)
+///   * size=0 → box extends to EOF. We read everything that's left as the
+///     body and signal EOF on the next call.
 async fn read_box<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<([u8; 4], Vec<u8>)>> {
     let mut header = [0u8; 8];
     let mut read_so_far = 0;
@@ -381,26 +432,31 @@ async fn read_box<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<([u8
     let mut kind = [0u8; 4];
     kind.copy_from_slice(&header[4..8]);
 
-    let total = match size_field {
-        0 => bail!("box with size=0 (extends to EOF) is not supported in streaming mode"),
-        1 => {
-            let mut ext = [0u8; 8];
-            reader.read_exact(&mut ext).await?;
-            let ext_size = u64::from_be_bytes(ext);
-            if ext_size < 16 {
-                bail!("extended box size {ext_size} < 16");
-            }
-            ext_size
+    let mut full = Vec::with_capacity(8);
+    full.extend_from_slice(&header);
+
+    if size_field == 0 {
+        reader.read_to_end(&mut full).await?;
+        return Ok(Some((kind, full)));
+    }
+
+    let total = if size_field == 1 {
+        let mut ext = [0u8; 8];
+        reader.read_exact(&mut ext).await?;
+        full.extend_from_slice(&ext);
+        let ext_size = u64::from_be_bytes(ext);
+        if ext_size < 16 {
+            bail!("extended box size {ext_size} < 16");
         }
-        n if n < 8 => bail!("box size {n} < 8"),
-        n => n,
+        ext_size
+    } else if size_field < 8 {
+        bail!("box size {size_field} < 8");
+    } else {
+        size_field
     };
 
-    let body_len = (total - 8) as usize;
+    let body_len = (total as usize).saturating_sub(full.len());
     let mut body = vec![0u8; body_len];
-    // Replay the header so callers see complete boxes when they're reassembling.
-    let mut full = Vec::with_capacity(8 + body_len);
-    full.extend_from_slice(&header);
     let mut read = 0;
     while read < body_len {
         let n = reader.read(&mut body[read..]).await?;

@@ -15,6 +15,12 @@ body {
   background: var(--bg);
   color: var(--fg);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 header {
@@ -23,8 +29,7 @@ header {
   gap: 1rem;
   padding: 0.75rem 1.25rem;
   background: var(--panel);
-  position: sticky;
-  top: 0;
+  flex-shrink: 0;
   z-index: 10;
 }
 
@@ -46,9 +51,14 @@ header {
 #crumbs span.sep { color: var(--muted); }
 
 main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   padding: 1.25rem;
-  max-width: 1100px;
-  margin: 0 auto;
+}
+main:has(.player) {
+  padding: 0;
+  overflow: hidden;
 }
 
 .grid {
@@ -91,40 +101,81 @@ main {
 .player {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  position: relative;
-}
-.player video {
+  height: 100%;
   width: 100%;
-  max-height: 70vh;
-  background: #000;
-  border-radius: 6px;
 }
 
-.player-loading {
+.player-stage {
+  position: relative;
+  background: #000;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.player-stage video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.player-controls {
   position: absolute;
   left: 0;
   right: 0;
-  top: 0;
-  height: min(70vh, 100%);
-  display: none;
-  align-items: flex-end;
-  justify-content: center;
-  padding-bottom: 2.5rem;
+  bottom: 0;
+  padding: 0.6rem 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0));
+  opacity: 0;
+  transition: opacity 0.18s ease;
   pointer-events: none;
-  z-index: 5;
+  z-index: 10;
 }
-.player-loading.show { display: flex; }
-.player-loading-text {
-  background: rgba(0, 0, 0, 0.65);
-  color: var(--fg);
-  font-size: 0.9rem;
-  padding: 0.4rem 0.8rem;
-  border-radius: 4px;
+.player-stage.show-controls .player-controls,
+.player-stage:hover .player-controls {
+  opacity: 1;
+  pointer-events: auto;
 }
 
-.controls { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
-.controls label { color: var(--muted); font-size: 0.85rem; }
+.ctrl-btn {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.3rem 0.4rem;
+  border-radius: 4px;
+}
+.ctrl-btn:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+.ctrl-mute.muted { text-decoration: line-through; opacity: 0.6; }
+
+.ctrl-scrub { flex: 1; cursor: pointer; min-width: 80px; }
+.ctrl-volume { width: 80px; cursor: pointer; }
+.ctrl-time {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  min-width: 9ch;
+  text-align: center;
+}
+
+.ctrl-subs {
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.8rem;
+  max-width: 14ch;
+}
 .controls select {
   background: var(--panel);
   color: var(--fg);
@@ -143,13 +194,26 @@ details pre { overflow: auto; color: var(--muted); font-size: 0.78rem; }
   border-radius: 6px;
 }
 
-video::cue {
-  font-size: 115%;
+/* Custom subtitle layer. Anchored to the stage so it sits in the
+   letterbox area when the video is pillar/letterboxed; sized as a
+   percentage of the stage's actual rendered height (kept in sync by JS
+   via the --stage-h custom property). */
+.cue-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2%;
+  padding: 0 1rem;
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
   color: #f5e6a8;
-  background: transparent;
+  font-size: calc(var(--stage-h, 100vh) * 0.05);
+  line-height: 1.2;
+  white-space: pre-line;
   text-shadow: 0 0 3px #000, 0 0 3px #000, 0 2px 4px rgba(0, 0, 0, 0.9);
 }
-
-video:fullscreen::cue {
-  font-size: 5vh;
+.player-stage.show-controls .cue-overlay,
+.player-stage:hover .cue-overlay {
+  bottom: calc(2% + 2.5rem);
 }

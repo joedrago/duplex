@@ -155,15 +155,9 @@ async function renderPlay(path) {
     return;
   }
 
-  const video = el("video", { controls: true, playsInline: true, autoplay: true });
+  const video = el("video", { playsInline: true, autoplay: true });
+  const cueOverlay = el("div", { className: "cue-overlay" });
 
-  const loadingText = el("div", { className: "player-loading-text" }, "loading…");
-  const loadingOverlay = el("div", { className: "player-loading" }, loadingText);
-  attachLoadingOverlay(video, loadingOverlay, loadingText);
-
-  const wrap = el("div", { className: "player" }, video, loadingOverlay);
-
-  // Subtitle dropdown — sidecar + embedded text tracks.
   const subOpts = [el("option", { value: "" }, "subtitles: off")];
   info.sidecars?.forEach((s, i) => {
     subOpts.push(el("option", { value: "sidecar:" + i }, `${s.language || "?"} (sidecar ${s.format})`));
@@ -173,11 +167,23 @@ async function renderPlay(path) {
       subOpts.push(el("option", { value: "embedded:" + s.index }, `${s.language || "?"} (embedded ${s.codec || "text"})`));
     }
   });
-  const subSelect = el("select", null, ...subOpts);
+  const subSelect = el("select", { className: "ctrl-subs", title: "subtitles" }, ...subOpts);
 
-  const controls = el("div", { className: "controls" }, el("label", null, "subs:"), subSelect);
+  const playBtn = el("button", { className: "ctrl-btn ctrl-play", title: "play/pause" }, "▶");
+  const scrub = el("input", { type: "range", className: "ctrl-scrub", min: "0", max: "100", step: "any", value: "0" });
+  const timeDisplay = el("span", { className: "ctrl-time" }, "0:00 / 0:00");
+  const muteBtn = el("button", { className: "ctrl-btn ctrl-mute", title: "mute" }, "♪");
+  const volumeSlider = el("input", { type: "range", className: "ctrl-volume", min: "0", max: "1", step: "0.01", value: "1" });
+  const fsBtn = el("button", { className: "ctrl-btn ctrl-fs", title: "fullscreen" }, "⛶");
 
-  wrap.append(controls, detailsBlock(info));
+  const controlBar = el(
+    "div",
+    { className: "player-controls" },
+    playBtn, scrub, timeDisplay, muteBtn, volumeSlider, subSelect, fsBtn,
+  );
+
+  const stage = el("div", { className: "player-stage" }, video, cueOverlay, controlBar);
+  const wrap = el("div", { className: "player" }, stage, detailsBlock(info));
   app.replaceChildren(wrap);
 
   if (info.decision === "direct") {
@@ -197,8 +203,11 @@ async function renderPlay(path) {
     }
   }
 
+  attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn });
+
   subSelect.addEventListener("change", () => {
     [...video.querySelectorAll("track")].forEach((t) => t.remove());
+    cueOverlay.textContent = "";
     const val = subSelect.value;
     if (!val) return;
     const t = document.createElement("track");
@@ -208,54 +217,125 @@ async function renderPlay(path) {
     t.src = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(val)}`;
     t.srclang = "en";
     video.append(t);
-    // Activate it explicitly.
+    // Switch the track to `hidden` so the browser stops painting cues on
+    // the video itself; we render them into the cueOverlay anchored to
+    // the stage instead. The cuechange event still fires in hidden mode.
     setTimeout(() => {
       [...video.textTracks].forEach((tt) => {
-        tt.mode = "showing";
+        tt.mode = "hidden";
+        tt.oncuechange = () => {
+          const active = [...(tt.activeCues || [])];
+          cueOverlay.textContent = active.map((c) => c.text).join("\n");
+        };
       });
     }, 50);
   });
 }
 
-// Show "loading…" with elapsed-time feedback whenever the video is buffering.
-// Hides on `playing`; shows on `loadstart` / `waiting` / `stalled`. The text
-// upgrades after a few seconds so a long wait reads as "still working" rather
-// than a hung spinner.
-function attachLoadingOverlay(video, overlay, textNode) {
-  let timer = null;
-  let startedAt = 0;
+// Wires every custom control to the <video> element and handles
+// auto-hide. Bidirectional: input events drive the video, video events
+// (timeupdate, volumechange, play, pause, …) keep the controls in sync,
+// so the controls stay correct even when the user pauses via spacebar,
+// the browser autoplays, or fullscreen is exited via Esc.
+function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn }) {
+  let scrubbing = false;
 
-  const show = () => {
-    overlay.classList.add("show");
-    if (timer) return;
-    startedAt = performance.now();
-    const tick = () => {
-      const elapsed = (performance.now() - startedAt) / 1000;
-      if (elapsed < 3) {
-        textNode.textContent = "loading…";
-      } else if (elapsed < 15) {
-        textNode.textContent = `indexing… (${elapsed.toFixed(0)}s)`;
-      } else {
-        textNode.textContent = `still indexing — large file (${elapsed.toFixed(0)}s)`;
-      }
-    };
-    tick();
-    timer = setInterval(tick, 500);
+  const updatePlay = () => { playBtn.textContent = video.paused ? "▶" : "⏸"; };
+  const updateMute = () => { muteBtn.classList.toggle("muted", video.muted || video.volume === 0); };
+  const updateFs = () => { fsBtn.textContent = document.fullscreenElement ? "⛶" : "⛶"; };
+
+  playBtn.addEventListener("click", () => { video.paused ? video.play() : video.pause(); });
+  video.addEventListener("play", updatePlay);
+  video.addEventListener("pause", updatePlay);
+  video.addEventListener("ended", updatePlay);
+
+  video.addEventListener("loadedmetadata", () => {
+    if (isFinite(video.duration)) scrub.max = String(video.duration);
+  });
+  video.addEventListener("durationchange", () => {
+    if (isFinite(video.duration)) scrub.max = String(video.duration);
+  });
+  video.addEventListener("timeupdate", () => {
+    if (!scrubbing) scrub.value = String(video.currentTime);
+    timeDisplay.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+  });
+  scrub.addEventListener("input", () => {
+    scrubbing = true;
+    timeDisplay.textContent = `${fmtTime(parseFloat(scrub.value))} / ${fmtTime(video.duration)}`;
+  });
+  scrub.addEventListener("change", () => {
+    video.currentTime = parseFloat(scrub.value);
+    scrubbing = false;
+  });
+
+  muteBtn.addEventListener("click", () => { video.muted = !video.muted; });
+  volumeSlider.addEventListener("input", () => {
+    video.volume = parseFloat(volumeSlider.value);
+    video.muted = video.volume === 0;
+  });
+  video.addEventListener("volumechange", () => {
+    updateMute();
+    volumeSlider.value = String(video.muted ? 0 : video.volume);
+  });
+
+  fsBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen().catch(() => {});
+  });
+  document.addEventListener("fullscreenchange", updateFs);
+
+  video.addEventListener("click", () => { video.paused ? video.play() : video.pause(); });
+
+  // Spacebar toggles play/pause while the player is in view and a form
+  // control isn't focused.
+  const onKey = (ev) => {
+    if (ev.code !== "Space") return;
+    const tag = (document.activeElement?.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "select" || tag === "textarea") return;
+    ev.preventDefault();
+    video.paused ? video.play() : video.pause();
   };
-  const hide = () => {
-    overlay.classList.remove("show");
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
+  document.addEventListener("keydown", onKey);
+
+  let hideTimer = null;
+  const showControls = () => {
+    stage.classList.add("show-controls");
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    if (!video.paused) {
+      hideTimer = setTimeout(() => stage.classList.remove("show-controls"), 2500);
     }
   };
+  stage.addEventListener("mousemove", showControls);
+  stage.addEventListener("mouseenter", showControls);
+  stage.addEventListener("mouseleave", () => {
+    if (!video.paused) stage.classList.remove("show-controls");
+  });
+  video.addEventListener("pause", showControls);
+  showControls();
 
-  show();
-  video.addEventListener("playing", hide);
-  video.addEventListener("waiting", show);
-  video.addEventListener("stalled", show);
-  video.addEventListener("error", hide);
+  updatePlay();
+  updateMute();
+
+  // Keep `--stage-h` in sync with the stage's actual rendered height so
+  // .cue-overlay can size subtitles as a percentage of the player
+  // container (not the viewport, not the video).
+  const setStageH = () => {
+    stage.style.setProperty("--stage-h", stage.clientHeight + "px");
+  };
+  setStageH();
+  new ResizeObserver(setStageH).observe(stage);
 }
+
+function fmtTime(s) {
+  if (!isFinite(s) || s < 0) return "0:00";
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+}
+
 
 function detailsBlock(info) {
   if (!new URLSearchParams(window.location.search).has("debug")) {
