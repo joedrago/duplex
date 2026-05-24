@@ -43,21 +43,18 @@ function parseRoute() {
     return { kind: m[1], path }
 }
 
-function renderCrumbs(path) {
+function renderCrumbs(path, clickable) {
     crumbs.innerHTML = ""
     const parts = path.split("/").filter(Boolean)
     let acc = ""
-    const root = document.createElement("a")
-    root.href = "#/browse/"
-    root.textContent = "/"
-    crumbs.appendChild(root)
     parts.forEach((p, i) => {
         acc = acc ? acc + "/" + p : p
         const sep = document.createElement("span")
         sep.className = "sep"
-        sep.textContent = "/"
+        sep.textContent = " / "
         crumbs.appendChild(sep)
-        if (i + 1 < parts.length) {
+        const isClickable = clickable !== false && !(clickable === "dirs" && i === parts.length - 1)
+        if (isClickable) {
             const a = document.createElement("a")
             a.href = "#/browse/" + encodePath(acc)
             a.textContent = p
@@ -110,6 +107,7 @@ async function renderBrowse(path) {
                 el("div", { className: "name" }, entry.name),
                 el("div", { className: "meta" }, `${entry.children} entries`)
             )
+            tile.dataset.name = entry.name
             grid.append(tile)
         } else {
             const meta = [`${prettySize(entry.size)}`]
@@ -121,10 +119,43 @@ async function renderBrowse(path) {
                 el("div", { className: "name" }, entry.name, badge),
                 el("div", { className: "meta" }, meta.join(" · "))
             )
+            tile.dataset.name = entry.name
             grid.append(tile)
         }
     }
     app.replaceChildren(grid)
+    grid.addEventListener("mouseover", (ev) => {
+        const tile = ev.target.closest(".tile")
+        if (tile) setSelection(null)
+    })
+    grid.addEventListener("click", (ev) => {
+        const tile = ev.target.closest(".tile")
+        if (!tile) return
+        try {
+            localStorage.setItem("duplex.last:" + path, tile.dataset.name)
+            console.log(`[browse] saved last for "${path}": "${tile.dataset.name}"`)
+        } catch (e) {
+            console.log(`[browse] failed to save last for "${path}":`, e)
+        }
+    })
+    try {
+        const lastName = localStorage.getItem("duplex.last:" + path)
+        console.log(`[browse] restore last for "${path}":`, lastName)
+        if (lastName) {
+            const tiles = grid.querySelectorAll(".tile")
+            let found = false
+            for (const t of tiles) {
+                if (t.dataset.name === lastName) {
+                    setSelection(t)
+                    found = true
+                    break
+                }
+            }
+            console.log(`[browse] setSelection for "${lastName}":`, found ? "found" : "not found")
+        }
+    } catch (e) {
+        console.log(`[browse] failed to restore last for "${path}":`, e)
+    }
 }
 
 function prettySize(n) {
@@ -380,7 +411,7 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
 async function renderPlay(path) {
     teardownPlayer()
     document.documentElement.classList.add("player-active")
-    renderCrumbs(path)
+    renderCrumbs(path, "dirs")
     app.replaceChildren(el("p", null, "loading…"))
     let info
     try {
@@ -785,6 +816,7 @@ function setSelection(el) {
     if (el) {
         el.classList.add("selected")
         el.scrollIntoView({ block: "nearest", inline: "nearest" })
+        console.log(`[nav] setSelection:`, el)
     }
 }
 
