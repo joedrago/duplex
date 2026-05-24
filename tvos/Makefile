@@ -4,7 +4,7 @@ DEVELOPMENT_TEAM ?= $(shell security find-certificate -c "Apple Development" -p 
 PROJECT = Duplex.xcodeproj
 SCHEME = Duplex
 
-.PHONY: generate build simulator install massinstall list clean
+.PHONY: generate build simulator install run massinstall list clean
 
 generate: $(PROJECT)
 
@@ -17,6 +17,7 @@ build: generate
 		-scheme $(SCHEME) \
 		-sdk appletvos \
 		-configuration Release \
+		-destination 'generic/platform=tvOS' \
 		WEBVIEW_URL='$(WEBVIEW_URL)' \
 		DEVELOPMENT_TEAM='$(DEVELOPMENT_TEAM)' \
 		-allowProvisioningUpdates \
@@ -37,6 +38,13 @@ install: build
 	@if [ -z "$(DEVICE_ID)" ]; then echo "Error: No Apple TV found. Run 'xcrun devicectl list devices' and pass DEVICE_ID=..."; exit 1; fi
 	xcrun devicectl device install app --device $(DEVICE_ID) $(APP)
 	xcrun devicectl device process launch --device $(DEVICE_ID) --terminate-existing com.duplex.app
+
+run: build
+	$(eval APP := $(shell xcodebuild -project $(PROJECT) -scheme $(SCHEME) -sdk appletvos -configuration Release -showBuildSettings 2>/dev/null | awk '/ BUILT_PRODUCTS_DIR = /{print $$3}')/Duplex.app)
+	$(eval DEVICE_ID ?= $(shell xcrun devicectl list devices 2>/dev/null | grep 'Apple TV' | head -1 | awk '{for(i=1;i<=NF;i++) if($$i ~ /^[0-9A-F].*-.*-/) print $$i}'))
+	@if [ -z "$(DEVICE_ID)" ]; then echo "Error: No Apple TV found. Run 'xcrun devicectl list devices' and pass DEVICE_ID=..."; exit 1; fi
+	xcrun devicectl device install app --device $(DEVICE_ID) $(APP)
+	xcrun devicectl device process launch --device $(DEVICE_ID) --terminate-existing --console com.duplex.app
 
 list:
 	@xcrun devicectl list devices 2>/dev/null | grep 'Apple TV'

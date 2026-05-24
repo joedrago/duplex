@@ -16,6 +16,7 @@ class WebViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        NSLog("[Duplex] WebViewController.viewDidLoad bounds=%@", NSCoder.string(for: view.bounds))
         view.insetsLayoutMarginsFromSafeArea = false
         additionalSafeAreaInsets = .zero
 
@@ -24,8 +25,11 @@ class WebViewController: UIViewController {
         view.addSubview(tvWebView)
 
         let urlString = Bundle.main.infoDictionary?["WebViewURL"] as? String ?? "http://localhost:2345"
+        NSLog("[Duplex] Resolved WebViewURL from Info.plist: %@", urlString)
         if let url = URL(string: urlString) {
             tvWebView.load(url)
+        } else {
+            NSLog("[Duplex] ERROR: WebViewURL is not a valid URL: %@", urlString)
         }
 
         // Map the system play/pause control to a Space keystroke so the web
@@ -33,6 +37,7 @@ class WebViewController: UIViewController {
         // controls playback consistently.
         let commandCenter = MPRemoteCommandCenter.shared()
         commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            NSLog("[Duplex] MPRemoteCommand: togglePlayPause -> Space")
             self?.injectKeyEvent("keydown", key: " ")
             self?.injectKeyEvent("keyup", key: " ")
             return .success
@@ -48,6 +53,7 @@ class WebViewController: UIViewController {
         for press in presses {
             // Menu reloads the page (back-to-browse behavior).
             if press.type == .menu {
+                NSLog("[Duplex] press: MENU -> history.back/reload")
                 tvWebView.evaluateJavaScript("history.length > 1 ? history.back() : location.reload();")
                 return
             }
@@ -55,13 +61,16 @@ class WebViewController: UIViewController {
                 if key == "ArrowLeft" || key == "ArrowRight" {
                     let now = ProcessInfo.processInfo.systemUptime
                     if now - lastSeekTime < Self.seekThrottleInterval {
+                        NSLog("[Duplex] press: %@ (throttled)", key)
                         return
                     }
                     lastSeekTime = now
                 }
+                NSLog("[Duplex] press DOWN: %@", key)
                 injectKeyEvent("keydown", key: key)
                 return
             }
+            NSLog("[Duplex] press DOWN: unmapped type=%ld", press.type.rawValue)
         }
         super.pressesBegan(presses, with: event)
     }
@@ -69,6 +78,7 @@ class WebViewController: UIViewController {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             if let key = keyForPress(press) {
+                NSLog("[Duplex] press UP:   %@", key)
                 injectKeyEvent("keyup", key: key)
                 return
             }

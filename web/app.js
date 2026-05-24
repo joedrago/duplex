@@ -238,7 +238,7 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
                 hls.off(window.Hls.Events.ERROR, onError)
                 hls.off(window.Hls.Events.FRAG_LOADED, onFragLoaded)
             } catch (_) {}
-        },
+        }
     }
 }
 
@@ -333,7 +333,7 @@ async function renderPlay(path) {
         activeRecovery = installHlsRecovery({
             hls,
             video,
-            getMasterUrl: () => masterUrlFor(currentAudio),
+            getMasterUrl: () => masterUrlFor(currentAudio)
         })
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = masterUrlFor(initialAudio)
