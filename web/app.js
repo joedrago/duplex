@@ -633,7 +633,18 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
 // to a full source reload at the last known position. A stall watchdog
 // catches the case where the player thinks it's playing but the media
 // element hasn't advanced.
-function installHlsRecovery({ hls, video, getMasterUrl }) {
+// Error details that signal "this browser cannot ever play this stream" —
+// typically a codec the MSE pipeline doesn't decode (e.g. 10-bit H.264 on
+// Firefox/macOS). Retrying with recoverMediaError or a fresh manifest load
+// won't change the outcome, so we surface a clean message to the caller
+// instead of looping through reload attempts.
+const HLS_UNRECOVERABLE_DETAILS = new Set([
+    "manifestIncompatibleCodecsError",
+    "bufferIncompatibleCodecsError",
+    "bufferAddCodecError"
+])
+
+function installHlsRecovery({ hls, video, getMasterUrl, onUnplayable }) {
     let lastTime = 0
     let lastAdvanceAt = performance.now()
     let recoveryAttempts = 0
@@ -688,6 +699,19 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
     const onError = (_evt, data) => {
         if (!data.fatal) return
         console.warn("[hls] fatal error", data.type, data.details)
+        if (HLS_UNRECOVERABLE_DETAILS.has(data.details)) {
+            stopped = true
+            clearInterval(watchdog)
+            video.removeEventListener("timeupdate", onTimeUpdate)
+            try {
+                hls.off(window.Hls.Events.ERROR, onError)
+                hls.destroy()
+            } catch (e) {
+                console.warn("[hls] teardown threw", e)
+            }
+            onUnplayable?.(data.details)
+            return
+        }
         if (recoveryAttempts < 2) {
             recoveryAttempts++
             try {
@@ -975,7 +999,23 @@ async function renderPlay(path) {
         activeRecovery = installHlsRecovery({
             hls,
             video,
-            getMasterUrl: () => masterUrlFor(currentAudio)
+            getMasterUrl: () => masterUrlFor(currentAudio),
+            // MSE rejected a codec we declared (e.g. 10-bit H.264 on Firefox).
+            // Show a clean inline error instead of letting hls.js spam the
+            // console with retry attempts that can't possibly succeed.
+            onUnplayable: (detail) => {
+                const vc = info.probe?.streams?.find((s) => s.codec_type === "video")?.codec_name || "?"
+                const profile = info.probe?.streams?.find((s) => s.codec_type === "video")?.profile || ""
+                const desc = profile ? `${vc} (${profile})` : vc
+                app.replaceChildren(
+                    el(
+                        "div",
+                        { className: "error" },
+                        `this browser can't decode ${desc} via MSE (hls.js: ${detail}). try Safari or a native player.`
+                    ),
+                    detailsBlock(info)
+                )
+            }
         })
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = masterUrlFor(initialAudioIdx)
