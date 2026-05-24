@@ -488,9 +488,18 @@ function buildAlphabetRail(entries, list) {
         const rows = list.querySelectorAll(".col-row")
         for (const r of rows) {
             if (firstLetterBucket(r.dataset.name) === letter) {
-                r.scrollIntoView({ block: "center", behavior: "smooth" })
                 const link = r.querySelector(".row-link")
-                if (link) setSelection(link)
+                // Apply selection class directly rather than going through
+                // setSelection — its scroll helper only scrolls when the
+                // target is off-screen, but a letter-jump should always put
+                // the first matching row in the middle of the visible list,
+                // even when it happened to already be partially in view.
+                if (link) {
+                    const prev = currentSelection()
+                    if (prev && prev !== link) prev.classList.remove("selected")
+                    link.classList.add("selected")
+                }
+                r.scrollIntoView({ block: "center", behavior: "smooth" })
                 return
             }
         }
@@ -1366,13 +1375,46 @@ document.addEventListener("mouseover", (ev) => {
     }
 })
 
+// Find the nearest ancestor that actually scrolls vertically. Walks up until
+// it hits one with `overflow-y: auto|scroll` and a scrollable amount of
+// content; falls back to null (caller should treat as "no scroller").
+function scrollableAncestor(el) {
+    let p = el.parentElement
+    while (p) {
+        const s = getComputedStyle(p)
+        const oy = s.overflowY
+        if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight) {
+            return p
+        }
+        p = p.parentElement
+    }
+    return null
+}
+
+// Scroll `el` into view, centering it vertically when it isn't already fully
+// visible. Skips the scroll entirely when the element fits inside the
+// scroller's viewport — so incremental arrow-nav within the visible area
+// doesn't constantly re-center and feel jittery.
+function scrollSelectionIntoView(el) {
+    if (!el) return
+    const scroller = scrollableAncestor(el)
+    if (!scroller) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" })
+        return
+    }
+    const er = el.getBoundingClientRect()
+    const sr = scroller.getBoundingClientRect()
+    if (er.top >= sr.top && er.bottom <= sr.bottom) return
+    el.scrollIntoView({ block: "center", inline: "nearest" })
+}
+
 function setSelection(el) {
     const prev = currentSelection()
     if (prev === el) return
     if (prev) prev.classList.remove("selected")
     if (el) {
         el.classList.add("selected")
-        el.scrollIntoView({ block: "nearest", inline: "nearest" })
+        scrollSelectionIntoView(el)
         console.log(`[nav] setSelection:`, el)
     }
 }
@@ -1456,7 +1498,7 @@ function openPicker({ title, options, currentIndex, onSelect, onCancel }) {
             list.append(item)
         })
         const selEl = list.querySelector(".selected")
-        if (selEl) selEl.scrollIntoView({ block: "nearest" })
+        if (selEl) scrollSelectionIntoView(selEl)
     }
 
     const commit = (action) => {
