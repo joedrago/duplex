@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -7,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::api::{vpath, AppState};
 use crate::capability;
 use crate::library::Node;
+
+fn epoch_seconds(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/browse", get(browse))
@@ -31,11 +39,16 @@ pub enum Entry {
     Dir {
         name: String,
         children: usize,
+        /// Unix-epoch seconds. For directories this is the deep mtime —
+        /// the maximum mtime of any descendant file — so freshly added
+        /// files inside subtrees bubble up.
+        mtime: i64,
     },
     File {
         name: String,
         ext: Option<String>,
         size: u64,
+        mtime: i64,
         decision: Option<String>,
         codec_hint: Option<String>,
     },
@@ -82,6 +95,7 @@ pub async fn browse(
             Node::Dir(d) => entries.push(Entry::Dir {
                 name: name.clone(),
                 children: d.children.len(),
+                mtime: epoch_seconds(d.mtime),
             }),
             Node::File(f) => {
                 // Cheap quality hint without forcing a probe.
@@ -97,6 +111,7 @@ pub async fn browse(
                     name: name.clone(),
                     ext: f.ext.clone(),
                     size: f.size,
+                    mtime: epoch_seconds(f.mtime),
                     decision,
                     codec_hint,
                 });

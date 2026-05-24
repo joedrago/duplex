@@ -79,6 +79,9 @@ fn handle_event(lib: &Library, ev: &notify_debouncer_full::DebouncedEvent) {
                 }
             }
         }
+        // Keep the deep-mtime invariant in sync so freshly added files bubble
+        // up the ancestor chain for "Recently Added" sort/section.
+        crate::library::recompute_dir_mtimes(tree);
     });
 }
 

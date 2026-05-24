@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::library::{Dir, File, Library, Node, Root, Sidecar, Tree, SUB_EXTS, VIDEO_EXTS};
+use crate::library::{
+    recompute_dir_mtimes, Dir, File, Library, Node, Root, Sidecar, Tree, SUB_EXTS, VIDEO_EXTS,
+};
 
 /// Build a fresh Tree by walking every configured root.
 pub fn scan(lib: &Library) -> Tree {
@@ -15,6 +17,7 @@ pub fn scan(lib: &Library) -> Tree {
             .children
             .insert(root.name.clone(), Node::Dir(root_dir));
     }
+    recompute_dir_mtimes(&mut tree);
     tree
 }
 

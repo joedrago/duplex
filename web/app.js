@@ -1,12 +1,83 @@
 // Tiny vanilla-JS client. Hash-routed:
 //   #/browse/<path>     (path may be empty, "Movies", "Movies/Action", ...)
 //   #/play/<path>
+//   #/settings
 //
 // All routing is driven by `location.hash` so the server doesn't have to know
 // about client routes.
 
 const app = document.getElementById("app")
 const crumbs = document.getElementById("crumbs")
+const headerActions = document.getElementById("header-actions")
+
+// Sort mode for the browse grid. Persisted in localStorage so the user gets
+// the same order on next launch. Continue Watching and the root Recently
+// Added section have their own intrinsic order; this only governs the main
+// directory listing.
+const SORT_KEY = "duplex.sort"
+function getSort() {
+    try {
+        return localStorage.getItem(SORT_KEY) || "name"
+    } catch {
+        return "name"
+    }
+}
+function setSort(v) {
+    try {
+        localStorage.setItem(SORT_KEY, v)
+    } catch (e) {
+        console.warn("[sort] write failed", e)
+    }
+}
+
+// Resume-position store. Map of vpath -> {pos, dur, at}. Lives in
+// localStorage so it survives across sessions but never touches the server's
+// disk (the server is read-only by design). Pruned at write time: entries in
+// the first 5s or beyond 95% of duration are removed so "Continue Watching"
+// doesn't list things you barely started or already finished.
+const RESUME_KEY = "duplex.resume"
+const RESUME_HEAD_S = 5
+const RESUME_TAIL_FRAC = 0.95
+
+function readResumeMap() {
+    try {
+        return JSON.parse(localStorage.getItem(RESUME_KEY) || "{}") || {}
+    } catch {
+        return {}
+    }
+}
+function writeResumeMap(m) {
+    try {
+        localStorage.setItem(RESUME_KEY, JSON.stringify(m))
+    } catch (e) {
+        console.warn("[resume] write failed", e)
+    }
+}
+function setResume(path, pos, dur) {
+    if (!path || !isFinite(pos) || !isFinite(dur) || dur <= 0) return
+    const m = readResumeMap()
+    if (pos < RESUME_HEAD_S || pos > dur * RESUME_TAIL_FRAC) {
+        if (path in m) {
+            delete m[path]
+            writeResumeMap(m)
+            console.log(`[resume] cleared "${path}" (pos=${pos.toFixed(1)}s of ${dur.toFixed(0)}s)`)
+        }
+        return
+    }
+    m[path] = { pos, dur, at: Date.now() }
+    writeResumeMap(m)
+}
+function clearResume(path) {
+    const m = readResumeMap()
+    if (path in m) {
+        delete m[path]
+        writeResumeMap(m)
+        console.log(`[resume] cleared "${path}"`)
+    }
+}
+function getResume(path) {
+    return readResumeMap()[path] || null
+}
 
 // Diagnostic: probe localStorage durability across app relaunches.
 // Logs what we read on this launch, then stamps a fresh value so the next
@@ -36,6 +107,7 @@ function encodePath(p) {
 
 function parseRoute() {
     const h = location.hash.replace(/^#/, "") || "/browse/"
+    if (h === "/settings" || h === "/settings/") return { kind: "settings", path: "" }
     const m = h.match(/^\/(browse|play)\/(.*)$/)
     if (!m) return { kind: "browse", path: "" }
     const rawPath = m[2] || ""
@@ -83,9 +155,46 @@ function el(tag, props, ...children) {
     return e
 }
 
+function renderSortToggle() {
+    const cur = getSort()
+    const make = (val, label) => {
+        const btn = el("button", { className: "sort-pill" + (cur === val ? " active" : ""), type: "button" }, label)
+        btn.addEventListener("click", () => {
+            if (getSort() === val) return
+            setSort(val)
+            render()
+        })
+        return btn
+    }
+    return el(
+        "div",
+        { className: "sort-toggle", title: "Sort order" },
+        el("span", { className: "sort-label" }, "Sort"),
+        make("name", "Name"),
+        make("recent", "Recent")
+    )
+}
+
+function clearHeaderActions() {
+    headerActions.replaceChildren()
+}
+
+function sortEntries(entries, mode) {
+    if (mode !== "recent") return entries
+    // Stable secondary by name so equal mtimes (or zero mtimes from unknown
+    // values) still produce a predictable order.
+    return [...entries].sort((a, b) => {
+        const dm = (b.mtime || 0) - (a.mtime || 0)
+        if (dm !== 0) return dm
+        return a.name.localeCompare(b.name)
+    })
+}
+
 async function renderBrowse(path) {
     document.documentElement.classList.remove("player-active")
     renderCrumbs(path)
+    clearHeaderActions()
+    headerActions.append(renderSortToggle())
     app.replaceChildren(el("p", { className: "muted" }, "loading…"))
     let data
     try {
@@ -94,11 +203,34 @@ async function renderBrowse(path) {
         app.replaceChildren(el("div", { className: "error" }, "browse failed: " + e.message))
         return
     }
+    const sections = el("div", { className: "browse-sections" })
+    if (path === "") {
+        const cw = renderContinueWatching()
+        if (cw) sections.append(cw)
+        // Recently Added across libraries — fetched lazily; placeholder
+        // appended now and replaced when the response lands so the grid
+        // below renders immediately.
+        const recentSlot = el("div", { className: "browse-section recent-slot" })
+        sections.append(recentSlot)
+        fetchAndRenderRecent(recentSlot)
+    }
     const grid = el("div", { className: "grid" })
-    if (data.entries.length === 0) {
+    const sortedEntries = sortEntries(data.entries, getSort())
+    const gridWrap = el("div", { className: "grid-wrap" }, grid)
+    // Alphabet rail: only worthwhile when the directory is long enough that
+    // scanning by name becomes annoying. The rail is grid-aware (jumps based
+    // on tile.dataset.name) so the Recent sort doesn't break it — letters
+    // simply jump to wherever the first matching tile ended up.
+    const ALPHABET_RAIL_THRESHOLD = 20
+    let rail = null
+    if (sortedEntries.length >= ALPHABET_RAIL_THRESHOLD) {
+        rail = buildAlphabetRail(sortedEntries, grid)
+        gridWrap.append(rail)
+    }
+    if (sortedEntries.length === 0) {
         grid.append(el("p", null, "(empty directory)"))
     }
-    for (const entry of data.entries) {
+    for (const entry of sortedEntries) {
         const full = path ? path + "/" + entry.name : entry.name
         if (entry.kind === "dir") {
             const tile = el(
@@ -123,7 +255,8 @@ async function renderBrowse(path) {
             grid.append(tile)
         }
     }
-    app.replaceChildren(grid)
+    sections.append(gridWrap)
+    app.replaceChildren(sections)
     grid.addEventListener("mouseover", (ev) => {
         const tile = ev.target.closest(".tile")
         if (tile) setSelection(null)
@@ -156,6 +289,157 @@ async function renderBrowse(path) {
     } catch (e) {
         console.log(`[browse] failed to restore last for "${path}":`, e)
     }
+}
+
+// Build the "Continue Watching" row from the resume map. Returns null if
+// nothing to show (no resumed items) so the caller can omit the section
+// entirely instead of rendering a sad empty header.
+function renderContinueWatching() {
+    const m = readResumeMap()
+    const items = Object.entries(m)
+        .map(([vpath, info]) => ({ vpath, ...info }))
+        .filter((it) => isFinite(it.pos) && isFinite(it.dur) && it.dur > 0)
+        .sort((a, b) => (b.at || 0) - (a.at || 0))
+    if (items.length === 0) return null
+
+    const row = el("div", { className: "cw-row" })
+    const section = el(
+        "section",
+        { className: "browse-section continue-watching" },
+        el("h2", { className: "section-title" }, "Continue Watching"),
+        row
+    )
+
+    for (const it of items) {
+        const basename = it.vpath.split("/").pop() || it.vpath
+        const remaining = Math.max(0, it.dur - it.pos)
+        const pct = Math.max(0, Math.min(100, (it.pos / it.dur) * 100))
+        const progress = el(
+            "div",
+            { className: "cw-progress" },
+            el("div", { className: "cw-progress-fill", style: `width:${pct.toFixed(1)}%` })
+        )
+        const tile = el(
+            "a",
+            { className: "tile cw-tile", href: "#/play/" + encodePath(it.vpath) },
+            el("div", { className: "name" }, basename),
+            el("div", { className: "meta" }, `${fmtTime(remaining)} left`),
+            progress
+        )
+        tile.dataset.name = basename
+
+        const removeBtn = el("button", { className: "cw-remove", type: "button", title: "Forget this position" }, "✕ Remove")
+        removeBtn.addEventListener("click", (ev) => {
+            ev.preventDefault()
+            ev.stopPropagation()
+            clearResume(it.vpath)
+            // Re-render the section in place; if it becomes empty, drop it.
+            const fresh = renderContinueWatching()
+            if (fresh) {
+                section.replaceWith(fresh)
+                // Restore selection to the equivalent position in the new row.
+                const nextSel = fresh.querySelector(".cw-tile, .cw-remove")
+                if (nextSel) setSelection(nextSel)
+            } else {
+                section.remove()
+                // Selection landed on the grid below; pick the first selectable.
+                const fallback = document.querySelector(".grid .tile")
+                if (fallback) setSelection(fallback)
+            }
+        })
+
+        const card = el("div", { className: "cw-card" }, tile, removeBtn)
+        row.append(card)
+    }
+    return section
+}
+
+// Bucket an entry name's first character into one of 27 buckets so the rail
+// can present "#" (digits/symbols) + "A".."Z" and quickly map a letter to
+// matching tiles. Non-ASCII letters fall into "#"; mostly a no-op for
+// English-named libraries but keeps the rail honest about coverage.
+function firstLetterBucket(name) {
+    const c = (name || "").trimStart().charAt(0).toUpperCase()
+    if (c >= "A" && c <= "Z") return c
+    return "#"
+}
+
+function buildAlphabetRail(entries, grid) {
+    const LETTERS = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+    const presentSet = new Set(entries.map((e) => firstLetterBucket(e.name)))
+    const rail = el("aside", { className: "alphabet-rail", role: "navigation" })
+
+    const jumpTo = (letter) => {
+        // Find the first tile whose name falls into this letter bucket.
+        const tiles = grid.querySelectorAll(".tile")
+        for (const t of tiles) {
+            if (firstLetterBucket(t.dataset.name) === letter) {
+                t.scrollIntoView({ block: "center", behavior: "smooth" })
+                setSelection(t)
+                return
+            }
+        }
+    }
+
+    for (const letter of LETTERS) {
+        const present = presentSet.has(letter)
+        const cls = "rail-letter" + (present ? "" : " disabled")
+        const btn = el("button", { className: cls, type: "button", disabled: !present, tabIndex: present ? 0 : -1 }, letter)
+        if (present) {
+            btn.dataset.letter = letter
+            btn.addEventListener("click", (ev) => {
+                ev.preventDefault()
+                jumpTo(letter)
+            })
+        }
+        rail.append(btn)
+    }
+    return rail
+}
+
+async function fetchAndRenderRecent(slot) {
+    let data
+    try {
+        data = await getJSON("/api/recent?limit=10")
+    } catch (e) {
+        console.warn("[recent] fetch failed", e)
+        slot.remove()
+        return
+    }
+    if (!data.items || data.items.length === 0) {
+        slot.remove()
+        return
+    }
+    const row = el("div", { className: "recent-row" })
+    for (const it of data.items) {
+        // Parent directory shown as small context above the filename so the
+        // user can tell "TestLibrary/TV/Show1/Ep01" from "Movies/Movie1".
+        const parts = it.vpath.split("/")
+        const basename = parts.pop()
+        const parent = parts.join(" / ")
+        const tile = el(
+            "a",
+            { className: "tile recent-tile", href: "#/play/" + encodePath(it.vpath) },
+            parent ? el("div", { className: "tile-context" }, parent) : null,
+            el("div", { className: "name" }, basename),
+            el("div", { className: "meta" }, `${prettySize(it.size)} · ${formatRelative(it.mtime)}`)
+        )
+        tile.dataset.name = basename
+        row.append(tile)
+    }
+    slot.replaceChildren(el("h2", { className: "section-title" }, "Recently Added"), row)
+}
+
+function formatRelative(epochSec) {
+    if (!epochSec) return ""
+    const diff = Date.now() / 1000 - epochSec
+    if (diff < 60) return "just now"
+    if (diff < 3600) return `${Math.round(diff / 60)}m ago`
+    if (diff < 86400) return `${Math.round(diff / 3600)}h ago`
+    if (diff < 86400 * 7) return `${Math.round(diff / 86400)}d ago`
+    if (diff < 86400 * 30) return `${Math.round(diff / 86400 / 7)}w ago`
+    if (diff < 86400 * 365) return `${Math.round(diff / 86400 / 30)}mo ago`
+    return `${Math.round(diff / 86400 / 365)}y ago`
 }
 
 function prettySize(n) {
@@ -258,6 +542,10 @@ function installPlayerRemoteHandler({ video, stage, _playBtn, subSelect, audioSe
 
     const handleKey = (ev) => {
         const k = ev.key
+        // When the post-play "Continue" button is the active selection, let
+        // spatial nav fire its click on Enter/Space instead of swallowing
+        // the key for play/pause.
+        if (document.querySelector(".continue-next-btn.selected")) return false
         if (k === " " || k === "Enter") {
             ev.preventDefault()
             togglePlay()
@@ -408,8 +696,95 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
     }
 }
 
+function renderSettings() {
+    document.documentElement.classList.remove("player-active")
+    clearHeaderActions()
+    crumbs.innerHTML = ""
+    // Render a single "Settings" crumb so the user knows where they are.
+    const span = document.createElement("span")
+    span.textContent = "settings"
+    crumbs.appendChild(document.createElement("span")).className = "sep"
+    crumbs.lastChild.textContent = " / "
+    crumbs.appendChild(span)
+
+    const positionsCount = Object.keys(readResumeMap()).length
+    const lastKeysCount = (() => {
+        try {
+            let n = 0
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i)
+                if (k && k.startsWith("duplex.last:")) n++
+            }
+            return n
+        } catch {
+            return 0
+        }
+    })()
+
+    const positionsRow = settingsRow(
+        "Resume positions",
+        `${positionsCount} remembered`,
+        "Forget all",
+        () => {
+            if (!confirm(`Forget all ${positionsCount} remembered positions?`)) return
+            try {
+                localStorage.removeItem(RESUME_KEY)
+            } catch (e) {
+                console.warn("[settings] failed to clear positions", e)
+            }
+            render()
+        },
+        positionsCount === 0
+    )
+    const selectionsRow = settingsRow(
+        "Remembered selections",
+        `${lastKeysCount} directories`,
+        "Forget all",
+        () => {
+            if (!confirm(`Forget remembered selection in ${lastKeysCount} directories?`)) return
+            try {
+                const toRemove = []
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i)
+                    if (k && k.startsWith("duplex.last:")) toRemove.push(k)
+                }
+                for (const k of toRemove) localStorage.removeItem(k)
+            } catch (e) {
+                console.warn("[settings] failed to clear selections", e)
+            }
+            render()
+        },
+        lastKeysCount === 0
+    )
+
+    const page = el(
+        "div",
+        { className: "settings-page" },
+        el("h1", { className: "settings-title" }, "Settings"),
+        el("div", { className: "settings-list" }, positionsRow, selectionsRow)
+    )
+    app.replaceChildren(page)
+}
+
+function settingsRow(title, status, actionLabel, onClick, disabled) {
+    const btn = el("button", { className: "settings-action", type: "button", disabled: !!disabled }, actionLabel)
+    if (!disabled) btn.addEventListener("click", onClick)
+    return el(
+        "div",
+        { className: "settings-row" },
+        el(
+            "div",
+            { className: "settings-row-text" },
+            el("div", { className: "settings-row-title" }, title),
+            el("div", { className: "settings-row-status" }, status)
+        ),
+        btn
+    )
+}
+
 async function renderPlay(path) {
     teardownPlayer()
+    clearHeaderActions()
     document.documentElement.classList.add("player-active")
     renderCrumbs(path, "dirs")
     app.replaceChildren(el("p", null, "loading…"))
@@ -572,7 +947,7 @@ async function renderPlay(path) {
 
     video.volume = initVolume
     video.muted = savedMuted
-    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn })
+    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path })
     // tvOS-style remote handling is opt-in via the `IS_TV` flag the native
     // wrapper sets after page load. In a browser, leave window.duplexPlayer
     // unset so the keydown handler falls through to ordinary spatial nav
@@ -613,8 +988,89 @@ async function renderPlay(path) {
 // (timeupdate, volumechange, play, pause, …) keep the controls in sync,
 // so the controls stay correct even when the user pauses via spacebar,
 // the browser autoplays, or fullscreen is exited via Esc.
-function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn }) {
+// When a video naturally ends (including a scrub-to-end), ask the server
+// what would play next in the same directory and surface a single
+// "Continue → <name>" button. Lightweight by design: no countdown, no
+// auto-play, no playlist queue — just one click/OK and we navigate.
+async function maybeShowContinueNext({ stage, path }) {
+    if (!path) return
+    let data
+    try {
+        const r = await fetch("/api/next?path=" + encodeURIComponent(path))
+        if (r.status === 404) return
+        if (!r.ok) {
+            console.warn("[next] fetch failed", r.status)
+            return
+        }
+        data = await r.json()
+    } catch (e) {
+        console.warn("[next] fetch threw", e)
+        return
+    }
+    // Already showing one? Replace it (avoid stacking on re-end).
+    const old = stage.querySelector(".continue-next")
+    if (old) old.remove()
+
+    const btn = el(
+        "a",
+        { className: "continue-next-btn", href: "#/play/" + encodePath(data.vpath) },
+        el("div", { className: "continue-next-arrow" }, "▶"),
+        el(
+            "div",
+            { className: "continue-next-meta" },
+            el("div", { className: "continue-next-label" }, "Continue"),
+            el("div", { className: "continue-next-name" }, data.name)
+        )
+    )
+    const overlay = el("div", { className: "continue-next" }, btn)
+    stage.append(overlay)
+    // Make sure spatial-nav and the player key handler both pick the button
+    // as the active target; OK/Enter should fire the navigate.
+    setSelection(btn)
+    console.log(`[next] showing Continue → ${data.vpath}`)
+}
+
+function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path }) {
     let scrubbing = false
+    let resumed = false
+    // Restore prior position on first loadedmetadata. We only do this once per
+    // mount — later metadata events (audio-track swaps reload the source and
+    // we seek back manually in that flow) shouldn't re-trigger restore.
+    const tryResume = () => {
+        if (resumed || !path) return
+        const entry = getResume(path)
+        if (!entry) {
+            resumed = true
+            return
+        }
+        if (entry.pos > 0 && isFinite(video.duration) && entry.pos < video.duration) {
+            console.log(`[resume] restoring "${path}" to ${entry.pos.toFixed(1)}s`)
+            video.currentTime = entry.pos
+        }
+        resumed = true
+    }
+    video.addEventListener("loadedmetadata", tryResume)
+    if (video.readyState >= 1) tryResume()
+
+    // Heartbeat: persist every HEARTBEAT_MS while playing, plus on pause and
+    // on any scrub committal. setResume() handles the "first 5s / last 5%"
+    // edge cases by clearing rather than writing.
+    const HEARTBEAT_MS = 5000
+    let lastPersistAt = 0
+    const persistNow = () => {
+        if (!path) return
+        const dur = video.duration
+        if (!isFinite(dur) || dur <= 0) return
+        setResume(path, video.currentTime, dur)
+        lastPersistAt = performance.now()
+    }
+    const maybePersist = () => {
+        if (performance.now() - lastPersistAt > HEARTBEAT_MS) persistNow()
+    }
+    video.addEventListener("ended", async () => {
+        if (path) clearResume(path)
+        await maybeShowContinueNext({ stage, path })
+    })
 
     const updatePlay = () => {
         playBtn.textContent = video.paused ? "▶" : "⏸"
@@ -642,7 +1098,9 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     video.addEventListener("timeupdate", () => {
         if (!scrubbing) scrub.value = String(video.currentTime)
         timeDisplay.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`
+        maybePersist()
     })
+    video.addEventListener("pause", persistNow)
     scrub.addEventListener("input", () => {
         scrubbing = true
         timeDisplay.textContent = `${fmtTime(parseFloat(scrub.value))} / ${fmtTime(video.duration)}`
@@ -650,6 +1108,7 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     scrub.addEventListener("change", () => {
         video.currentTime = parseFloat(scrub.value)
         scrubbing = false
+        persistNow()
     })
 
     muteBtn.addEventListener("click", () => {
@@ -773,6 +1232,7 @@ function render() {
     closeOpenPicker()
     if (r.kind !== "play") teardownPlayer()
     if (r.kind === "play") renderPlay(r.path)
+    else if (r.kind === "settings") renderSettings()
     else renderBrowse(r.path)
     // Intentionally not auto-selecting anything — the spatial-nav highlight
     // only appears once the user presses an arrow key.

@@ -276,17 +276,33 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
                 video_dts_resolved = true;
                 let queued: Vec<_> = pending_video.drain(..).collect();
                 for mut q in queued {
-                    write_video_packet(&mut q, &mut output, video_out_idx, video_time_base, video_out_tb)?;
+                    write_video_packet(
+                        &mut q,
+                        &mut output,
+                        video_out_idx,
+                        video_time_base,
+                        video_out_tb,
+                    )?;
                 }
             }
-            write_video_packet(&mut packet, &mut output, video_out_idx, video_time_base, video_out_tb)?;
+            write_video_packet(
+                &mut packet,
+                &mut output,
+                video_out_idx,
+                video_time_base,
+                video_out_tb,
+            )?;
         } else if pkt_stream_idx == audio_in_idx {
             if let Some(chain) = audio_chain.as_mut() {
                 process_audio_transcode(chain, &packet, &mut output, audio_out_idx, audio_out_tb)?;
             } else {
                 packet.set_stream_index(audio_out_idx);
                 unsafe {
-                    ffi::av_packet_rescale_ts(packet.as_mut_ptr(), audio_in_time_base, audio_out_tb);
+                    ffi::av_packet_rescale_ts(
+                        packet.as_mut_ptr(),
+                        audio_in_time_base,
+                        audio_out_tb,
+                    );
                 }
                 if let Err(e) = output.interleaved_write_frame(&mut packet) {
                     bail!("interleaved_write_frame (audio): {e}");

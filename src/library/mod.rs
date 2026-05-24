@@ -31,9 +31,23 @@ pub enum Node {
     File(File),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Dir {
     pub children: BTreeMap<String, Node>,
+    /// "Deep" mtime: the maximum mtime of any descendant file (or the directory's
+    /// own mtime if it has no descendants). Computed by scan and refreshed by
+    /// the watcher. Used by browse to sort by Recently Added in a way that
+    /// surfaces freshly-added files inside deep subtrees.
+    pub mtime: SystemTime,
+}
+
+impl Default for Dir {
+    fn default() -> Self {
+        Self {
+            children: BTreeMap::new(),
+            mtime: SystemTime::UNIX_EPOCH,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -170,11 +184,37 @@ fn clone_tree(t: &Tree) -> Tree {
 }
 
 fn clone_dir(d: &Dir) -> Dir {
-    let mut out = Dir::default();
+    let mut out = Dir {
+        mtime: d.mtime,
+        ..Dir::default()
+    };
     for (k, v) in &d.children {
         out.children.insert(k.clone(), clone_node(v));
     }
     out
+}
+
+/// Walk a tree post-order and set each directory's `mtime` to the maximum
+/// mtime of any descendant file. A directory with no file descendants keeps
+/// the default `UNIX_EPOCH`. Called from scan after building the tree, and
+/// from the watcher after mutating it.
+pub fn recompute_dir_mtimes(tree: &mut Tree) {
+    recompute_dir_mtimes_inner(&mut tree.root);
+}
+
+fn recompute_dir_mtimes_inner(d: &mut Dir) -> SystemTime {
+    let mut m = SystemTime::UNIX_EPOCH;
+    for child in d.children.values_mut() {
+        let cm = match child {
+            Node::File(f) => f.mtime,
+            Node::Dir(sub) => recompute_dir_mtimes_inner(sub),
+        };
+        if cm > m {
+            m = cm;
+        }
+    }
+    d.mtime = m;
+    m
 }
 
 fn clone_node(n: &Node) -> Node {

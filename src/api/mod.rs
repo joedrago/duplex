@@ -13,7 +13,9 @@ use crate::stream::StreamCache;
 pub mod browse;
 pub mod file;
 pub mod hls;
+pub mod next;
 pub mod raw;
+pub mod recent;
 pub mod subs;
 pub mod vpath;
 pub mod web;
@@ -41,6 +43,8 @@ pub fn router(state: AppState) -> Router {
         .merge(raw::routes())
         .merge(hls::routes())
         .merge(subs::routes())
+        .merge(recent::routes())
+        .merge(next::routes())
         .merge(web::routes())
         .with_state(state)
         .layer(cors)
