@@ -90,7 +90,22 @@ pub async fn browse(
 
     let caps = capability::default_caps();
     let mut entries = Vec::with_capacity(dir.children.len());
-    for (name, node) in &dir.children {
+
+    // At the virtual root, emit library roots in CLI order (the order the user
+    // passed --library on the command line) rather than the BTreeMap's
+    // alphabetical iteration. Deeper directories stay alphabetical.
+    let ordered: Vec<(&String, &Node)> = if vpath_norm.is_empty() {
+        state
+            .library
+            .roots
+            .iter()
+            .filter_map(|r| dir.children.get_key_value(&r.name))
+            .collect()
+    } else {
+        dir.children.iter().collect()
+    };
+
+    for (name, node) in ordered {
         match node {
             Node::Dir(d) => entries.push(Entry::Dir {
                 name: name.clone(),

@@ -310,11 +310,17 @@ function columnHeader(title) {
 }
 
 // One browse-listing row used in subdir view and the Libraries column.
+// Strip trailing video extensions for display only. Filenames on disk and
+// in the API (entry.name, vpath, dataset.name) keep the extension.
+function displayName(name) {
+    return name.replace(/\.(mp4|mkv)$/i, "")
+}
+
 function makeBrowseRow(entry, vpath) {
     const isDir = entry.kind === "dir"
     const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
-    const name = el("div", { className: "row-name" }, entry.name)
+    const name = el("div", { className: "row-name" }, isDir ? entry.name : displayName(entry.name))
     if (!isDir && entry.decision) name.append(el("span", { className: "badge " + entry.decision }, entry.decision))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
@@ -378,7 +384,7 @@ function renderContinueColumn() {
             el(
                 "div",
                 { className: "row-text" },
-                el("div", { className: "row-name" }, basename),
+                el("div", { className: "row-name" }, displayName(basename)),
                 el("div", { className: "row-meta" }, `${fmtTime(remaining)} left`)
             ),
             el(
@@ -445,7 +451,7 @@ async function fetchAndPopulateRecent(col) {
                 "div",
                 { className: "row-text" },
                 parent ? el("div", { className: "row-context" }, parent) : null,
-                el("div", { className: "row-name" }, basename),
+                el("div", { className: "row-name" }, isDir ? basename : displayName(basename)),
                 el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(it.mtime)}`)
             )
         )
