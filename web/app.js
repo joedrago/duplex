@@ -179,7 +179,8 @@ function installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSel
         console.log(`[player] toggle play: paused ${wasPaused} -> ${!wasPaused} at t=${video.currentTime.toFixed(2)}`)
     }
 
-    const pickerOptionsFromSelect = (sel) => Array.from(sel.options).map((o) => ({ value: o.value, label: o.textContent || o.value }))
+    const pickerOptionsFromSelect = (sel) =>
+        Array.from(sel.options).map((o) => ({ value: o.value, label: o.textContent || o.value }))
 
     const openSubsPicker = () => {
         if (!subSelect) return
@@ -252,7 +253,7 @@ function installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSel
             ev.preventDefault()
             console.log("[player] Escape -> back to browse")
             if (history.length > 1) history.back()
-            else (location.hash = "#/browse/")
+            else location.hash = "#/browse/"
             return true
         }
         return false
@@ -414,6 +415,13 @@ async function renderPlay(path) {
     // one track. Direct-play uses the raw file and the browser picks audio;
     // we can't switch tracks server-side in that mode.
     const audioTracks = info.audio_tracks ?? []
+    const initialAudioIdx = (() => {
+        const enTrack = audioTracks.find((a) => {
+            const lang = (a.language || "").toLowerCase()
+            return lang === "en" || lang.startsWith("en-") || lang === "eng"
+        })
+        return (enTrack || audioTracks[0])?.index
+    })()
     const audioSelect =
         info.decision !== "direct" && audioTracks.length > 1
             ? el(
@@ -423,7 +431,7 @@ async function renderPlay(path) {
                       const lang = a.language || `audio ${i + 1}`
                       const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
                       const ch = chInfo ? ` (${chInfo})` : ""
-                      return el("option", { value: a.index }, `${lang}${ch}`)
+                      return el("option", { value: a.index, selected: a.index === initialAudioIdx }, `${lang}${ch}`)
                   })
               )
             : null
@@ -431,8 +439,30 @@ async function renderPlay(path) {
     const playBtn = el("button", { className: "ctrl-btn ctrl-play", title: "play/pause" }, "▶")
     const scrub = el("input", { type: "range", className: "ctrl-scrub", min: "0", max: "100", step: "any", value: "0" })
     const timeDisplay = el("span", { className: "ctrl-time" }, "0:00 / 0:00")
+    const savedVolume = (() => {
+        try {
+            return parseFloat(localStorage.getItem("duplex.volume"))
+        } catch {
+            return NaN
+        }
+    })()
+    const savedMuted = (() => {
+        try {
+            return localStorage.getItem("duplex.muted") === "1"
+        } catch {
+            return false
+        }
+    })()
+    const initVolume = isFinite(savedVolume) ? savedVolume : 1
     const muteBtn = el("button", { className: "ctrl-btn ctrl-mute", title: "mute" }, "♪")
-    const volumeSlider = el("input", { type: "range", className: "ctrl-volume", min: "0", max: "1", step: "0.01", value: "1" })
+    const volumeSlider = el("input", {
+        type: "range",
+        className: "ctrl-volume",
+        min: "0",
+        max: "1",
+        step: "0.01",
+        value: String(initVolume)
+    })
     const fsBtn = el("button", { className: "ctrl-btn ctrl-fs", title: "fullscreen" }, "⛶")
 
     const controlBar = el(
@@ -453,15 +483,14 @@ async function renderPlay(path) {
     app.replaceChildren(wrap)
 
     const masterUrlFor = (audioIdx) => `${info.urls.master}${audioIdx !== undefined ? `?audio=${audioIdx}` : ""}`
-    const initialAudio = audioTracks[0]?.index
-    let currentAudio = initialAudio
+    let currentAudio = initialAudioIdx
 
     if (info.decision === "direct") {
         video.src = info.urls.raw
     } else if (window.Hls && window.Hls.isSupported()) {
         const hls = new window.Hls({ debug: false })
         activeHls = hls
-        hls.loadSource(masterUrlFor(initialAudio))
+        hls.loadSource(masterUrlFor(initialAudioIdx))
         hls.attachMedia(video)
         activeRecovery = installHlsRecovery({
             hls,
@@ -469,7 +498,7 @@ async function renderPlay(path) {
             getMasterUrl: () => masterUrlFor(currentAudio)
         })
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = masterUrlFor(initialAudio)
+        video.src = masterUrlFor(initialAudioIdx)
     } else {
         app.replaceChildren(el("div", { className: "error" }, "no HLS support in this browser"))
         return
@@ -484,7 +513,9 @@ async function renderPlay(path) {
             }
             const curTime = video.currentTime
             const wasPlaying = !video.paused
-            console.log(`[audio] switch: ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)} (wasPlaying=${wasPlaying}, native=${!activeHls})`)
+            console.log(
+                `[audio] switch: ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)} (wasPlaying=${wasPlaying}, native=${!activeHls})`
+            )
             currentAudio = audioIdx
             if (activeRecovery) activeRecovery.notePosition(curTime)
             const newUrl = masterUrlFor(audioIdx)
@@ -506,6 +537,8 @@ async function renderPlay(path) {
         })
     }
 
+    video.volume = initVolume
+    video.muted = savedMuted
     attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn })
     // tvOS-style remote handling is opt-in via the `IS_TV` flag the native
     // wrapper sets after page load. In a browser, leave window.duplexPlayer
@@ -596,6 +629,12 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     video.addEventListener("volumechange", () => {
         updateMute()
         volumeSlider.value = String(video.muted ? 0 : video.volume)
+        try {
+            localStorage.setItem("duplex.volume", String(video.volume))
+            localStorage.setItem("duplex.muted", video.muted ? "1" : "0")
+        } catch (e) {
+            void e
+        }
     })
 
     fsBtn.addEventListener("click", () => {
@@ -719,7 +758,7 @@ const SELECTABLE_SELECTOR = [
     'input:not([disabled]):not([type="hidden"])',
     "select:not([disabled])",
     "textarea:not([disabled])",
-    "[data-selectable]",
+    "[data-selectable]"
 ].join(",")
 
 function isVisible(el) {
@@ -871,7 +910,10 @@ const ARROW_DIRS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowR
 function describeEl(el) {
     if (!el) return "<none>"
     const id = el.id ? "#" + el.id : ""
-    const cls = el.className && typeof el.className === "string" ? "." + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join(".") : ""
+    const cls =
+        el.className && typeof el.className === "string"
+            ? "." + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join(".")
+            : ""
     const txt = (el.textContent || "").trim().slice(0, 30)
     return `<${el.tagName.toLowerCase()}${id}${cls} "${txt}">`
 }
