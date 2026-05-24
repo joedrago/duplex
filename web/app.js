@@ -984,33 +984,83 @@ async function renderPlay(path) {
         return
     }
 
-    // Apply a subtitle choice: tear down any existing <track>, then mount
-    // the new one in `hidden` mode so the browser fires cuechange events
-    // we can intercept and paint into our own .cue-overlay (the native
-    // rendering ignores our font-size + stage-anchored positioning).
-    const applySubChoice = (value) => {
+    // Subtitle rendering. We deliberately avoid the native <track> element:
+    // tvOS UIWebView's VTT pipeline crashes on cue boundaries, and even on
+    // desktop the native renderer ignores our stage-anchored .cue-overlay
+    // positioning. Fetching + parsing in JS is the same code path everywhere.
+    let cueGen = 0
+    let activeCues = []
+    let subsRafId = null
+
+    const parseVTT = (text) => {
+        const parseTime = (s) => {
+            const parts = s.replace(",", ".").split(":")
+            if (parts.length === 2) return parseFloat(parts[0]) * 60 + parseFloat(parts[1])
+            return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2])
+        }
+        const cues = []
+        for (const block of text.replace(/\r/g, "").split(/\n\n+/)) {
+            const lines = block.split("\n")
+            for (let i = 0; i < lines.length; i++) {
+                const m = lines[i].match(/(\d[\d:.,]*)\s+-->\s+(\d[\d:.,]*)/)
+                if (m) {
+                    // Strip VTT inline markup (<i>, <v Speaker>, <00:00:01.000>
+                    // timestamps, …) — we render as plain text via textContent.
+                    const body = lines.slice(i + 1).join("\n").replace(/<\/?[^>]+>/g, "").trim()
+                    if (body) cues.push({ start: parseTime(m[1]), end: parseTime(m[2]), text: body })
+                    break
+                }
+            }
+        }
+        return cues
+    }
+
+    const renderSubs = () => {
+        subsRafId = null
+        if (!cueOverlay.isConnected) return
+        if (!activeCues.length) {
+            if (cueOverlay.textContent !== "") cueOverlay.textContent = ""
+            return
+        }
+        // Small lookahead — currentTime lags wall-clock rendering slightly.
+        const t = video.currentTime + 0.15
+        let next = ""
+        for (const c of activeCues) {
+            if (t >= c.start && t <= c.end) {
+                if (next) next += "\n"
+                next += c.text
+            }
+        }
+        if (cueOverlay.textContent !== next) cueOverlay.textContent = next
+        subsRafId = requestAnimationFrame(renderSubs)
+    }
+
+    const kickSubsLoop = () => {
+        if (subsRafId == null) subsRafId = requestAnimationFrame(renderSubs)
+    }
+
+    const applySubChoice = async (value) => {
+        cueGen++
+        const gen = cueGen
         currentSubValue = value
         const label = value ? labelFor(subOptions, value) : "Off"
         subBtn.textContent = "CC " + label
-        ;[...video.querySelectorAll("track")].forEach((t) => t.remove())
+        activeCues = []
         cueOverlay.textContent = ""
         if (!value) return
-        const t = document.createElement("track")
-        t.kind = "subtitles"
-        t.default = true
-        t.label = label
-        t.src = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`
-        t.srclang = "en"
-        video.append(t)
-        setTimeout(() => {
-            ;[...video.textTracks].forEach((tt) => {
-                tt.mode = "hidden"
-                tt.oncuechange = () => {
-                    const active = [...(tt.activeCues || [])]
-                    cueOverlay.textContent = active.map((c) => c.text).join("\n")
-                }
-            })
-        }, 50)
+        try {
+            const r = await fetch(`/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`)
+            if (!r.ok) {
+                console.error(`[subs] fetch failed: ${r.status}`)
+                return
+            }
+            const text = await r.text()
+            if (gen !== cueGen) return
+            activeCues = parseVTT(text)
+            kickSubsLoop()
+        } catch (e) {
+            console.error("[subs] fetch error", e)
+        }
     }
 
     // Apply an audio choice: hls.js gets a new master URL; native HLS

@@ -10,3 +10,4 @@ package-lock.json
 /TEST_CORPUS.md
 /catalog.jsonl
 /scripts/catalog.jsonl
+.DS_Store
