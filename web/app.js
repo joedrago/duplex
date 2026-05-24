@@ -234,6 +234,9 @@ function renderRoot(data) {
     columns.append(renderContinueColumn())
 
     app.replaceChildren(columns)
+
+    const firstLibRow = columns.querySelector(".col-libraries .col-row")
+    if (firstLibRow) setSelection(firstLibRow.querySelector(".row-link") || firstLibRow)
 }
 
 // Subdir view: one full-width column with the directory listing + alphabet
@@ -272,13 +275,19 @@ function renderSubdir(path, data) {
     })
     try {
         const lastName = localStorage.getItem("duplex.last:" + path)
+        let selected = false
         if (lastName) {
             for (const r of list.querySelectorAll(".col-row")) {
                 if (r.dataset.name === lastName) {
                     setSelection(r.querySelector(".row-link") || r)
+                    selected = true
                     break
                 }
             }
+        }
+        if (!selected) {
+            const firstRow = list.querySelector(".col-row")
+            if (firstRow) setSelection(firstRow.querySelector(".row-link") || firstRow)
         }
     } catch (e) {
         void e
@@ -423,16 +432,21 @@ async function fetchAndPopulateRecent(col) {
         const parts = it.vpath.split("/")
         const basename = parts.pop()
         const parent = parts.join(" / ")
+        const isDir = it.kind === "dir"
+        const href = (isDir ? "#/browse/" : "#/play/") + encodePath(it.vpath)
+        const metaLeft = isDir
+            ? `${it.children} ${it.children === 1 ? "entry" : "entries"}`
+            : prettySize(it.size)
         const link = el(
             "a",
-            { className: "row-link row-file", href: "#/play/" + encodePath(it.vpath) },
-            el("span", { className: "row-icon" }, "🎬"),
+            { className: "row-link " + (isDir ? "row-dir" : "row-file"), href },
+            el("span", { className: "row-icon" }, isDir ? "📁" : "🎬"),
             el(
                 "div",
                 { className: "row-text" },
                 parent ? el("div", { className: "row-context" }, parent) : null,
                 el("div", { className: "row-name" }, basename),
-                el("div", { className: "row-meta" }, `${prettySize(it.size)} · ${formatRelative(it.mtime)}`)
+                el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(it.mtime)}`)
             )
         )
         const row = el("li", { className: "col-row" }, link)
