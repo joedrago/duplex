@@ -116,11 +116,129 @@ function prettySize(n) {
 }
 
 let activeHls = null
+let activeRecovery = null
 
 function teardownPlayer() {
+    if (activeRecovery) {
+        activeRecovery.stop()
+        activeRecovery = null
+    }
     if (activeHls) {
         activeHls.destroy()
         activeHls = null
+    }
+}
+
+// Keeps the HLS pipeline alive in the face of transient muxer errors,
+// audio-track switches that never finish buffering, and other "the
+// player gave up" cases. Standard hls.js recovery (recoverMediaError /
+// startLoad) handles the easy cases; for everything else we fall back
+// to a full source reload at the last known position. A stall watchdog
+// catches the case where the player thinks it's playing but the media
+// element hasn't advanced.
+function installHlsRecovery({ hls, video, getMasterUrl }) {
+    let lastTime = 0
+    let lastAdvanceAt = performance.now()
+    let recoveryAttempts = 0
+    let reloadPending = false
+    let stopped = false
+
+    const onTimeUpdate = () => {
+        if (!Number.isNaN(video.currentTime) && video.currentTime > 0) {
+            if (video.currentTime !== lastTime) {
+                lastAdvanceAt = performance.now()
+            }
+            lastTime = video.currentTime
+        }
+    }
+    video.addEventListener("timeupdate", onTimeUpdate)
+
+    const onFragLoaded = () => {
+        recoveryAttempts = 0
+    }
+    hls.on(window.Hls.Events.FRAG_LOADED, onFragLoaded)
+
+    const fullReload = () => {
+        if (stopped || reloadPending) return
+        reloadPending = true
+        const wasPlaying = !video.paused
+        const resumeAt = lastTime
+        console.warn(`[hls] full reload at ${resumeAt.toFixed(2)}s`)
+        try {
+            hls.loadSource(getMasterUrl())
+        } catch (e) {
+            console.warn("[hls] loadSource threw", e)
+        }
+        const onCanPlay = () => {
+            video.removeEventListener("canplay", onCanPlay)
+            if (resumeAt > 0) video.currentTime = resumeAt
+            if (wasPlaying) video.play().catch(() => {})
+            reloadPending = false
+            lastAdvanceAt = performance.now()
+        }
+        video.addEventListener("canplay", onCanPlay)
+        // If `canplay` never fires (e.g. the new manifest also fails),
+        // clear the latch after a generous timeout so the watchdog can
+        // attempt another reload.
+        setTimeout(() => {
+            if (reloadPending) {
+                video.removeEventListener("canplay", onCanPlay)
+                reloadPending = false
+            }
+        }, 30000)
+    }
+
+    const onError = (_evt, data) => {
+        if (!data.fatal) return
+        console.warn("[hls] fatal error", data.type, data.details)
+        if (recoveryAttempts < 2) {
+            recoveryAttempts++
+            try {
+                if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+                    hls.recoverMediaError()
+                    return
+                }
+                if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+                    hls.startLoad()
+                    return
+                }
+            } catch (e) {
+                console.warn("[hls] recovery threw", e)
+            }
+        }
+        fullReload()
+    }
+    hls.on(window.Hls.Events.ERROR, onError)
+
+    // Stall watchdog: if we expect to be playing but currentTime hasn't
+    // moved for STALL_LIMIT_MS, force a full reload. Catches the case
+    // where hls.js has silently given up and isn't emitting errors.
+    const STALL_LIMIT_MS = 15000
+    const watchdog = setInterval(() => {
+        if (stopped || video.paused || reloadPending) return
+        const sinceAdvance = performance.now() - lastAdvanceAt
+        if (sinceAdvance > STALL_LIMIT_MS && video.readyState < 3) {
+            console.warn(`[hls] stalled ${(sinceAdvance / 1000).toFixed(1)}s, reloading`)
+            fullReload()
+        }
+    }, 2000)
+
+    return {
+        notePosition(t) {
+            if (typeof t === "number" && !Number.isNaN(t)) {
+                lastTime = t
+                lastAdvanceAt = performance.now()
+            }
+        },
+        stop() {
+            stopped = true
+            clearInterval(watchdog)
+            video.removeEventListener("timeupdate", onTimeUpdate)
+            try {
+                hls.off(window.Hls.Events.ERROR, onError)
+                hls.off(window.Hls.Events.FRAG_LOADED, onFragLoaded)
+            } catch (_) {}
+        },
     }
 }
 
@@ -203,6 +321,7 @@ async function renderPlay(path) {
 
     const masterUrlFor = (audioIdx) => `${info.urls.master}${audioIdx !== undefined ? `?audio=${audioIdx}` : ""}`
     const initialAudio = audioTracks[0]?.index
+    let currentAudio = initialAudio
 
     if (info.decision === "direct") {
         video.src = info.urls.raw
@@ -211,6 +330,11 @@ async function renderPlay(path) {
         activeHls = hls
         hls.loadSource(masterUrlFor(initialAudio))
         hls.attachMedia(video)
+        activeRecovery = installHlsRecovery({
+            hls,
+            video,
+            getMasterUrl: () => masterUrlFor(currentAudio),
+        })
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = masterUrlFor(initialAudio)
     } else {
@@ -223,6 +347,8 @@ async function renderPlay(path) {
             const audioIdx = parseInt(audioSelect.value, 10)
             const curTime = video.currentTime
             const wasPlaying = !video.paused
+            currentAudio = audioIdx
+            if (activeRecovery) activeRecovery.notePosition(curTime)
             activeHls.loadSource(masterUrlFor(audioIdx))
             video.addEventListener("canplay", function onCanPlay() {
                 video.removeEventListener("canplay", onCanPlay)

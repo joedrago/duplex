@@ -171,6 +171,32 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
         .time_base;
 
     let mut pkt_count: usize = 0;
+
+    // MKV stores per-block timestamps (PTS only); DTS is reconstructed
+    // by the demuxer from has_b_frames + neighbouring frames. After
+    // `av_seek_frame` the first video packets (and on initial open the
+    // very first keyframe) come back with `dts == AV_NOPTS_VALUE`,
+    // because the demuxer hasn't seen enough trailing frames yet to
+    // reconstruct decode time. The mp4 muxer rejects NOPTS dts after
+    // the first packet, and even the first packet is risky because
+    // its implied dts (= pts) collides with later packets whose true
+    // dts is smaller (e.g. a keyframe at pts=0 whose actual dts is
+    // negative). We hold back packets with NOPTS dts until the first
+    // valid dts arrives, then back-fill the queue in decode order.
+    let mut pending_video: Vec<rsmpeg::avcodec::AVPacket> = Vec::new();
+    let mut video_dts_resolved = false;
+
+    // Open-GOP filter. Many HEVC encodes use *open* GOPs: a keyframe
+    // has B-frames after it in decode order whose display time is
+    // earlier than the keyframe — they reference the previous GOP's
+    // keyframe. Each HLS fragment must be self-decodable (see Apple's
+    // HLS authoring spec) because the player may jump directly into
+    // it without the previous fragment buffered. Drop any packet whose
+    // pts is less than the most recent keyframe's pts, and reset the
+    // anchor on every keyframe so the rule applies at every segment
+    // boundary, not just after a seek.
+    let mut current_keyframe_pts: Option<i64> = None;
+
     loop {
         // Backpressure: wait until consumer needs more.
         {
@@ -202,28 +228,65 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
 
         let pkt_stream_idx = packet.stream_index as usize;
         if pkt_stream_idx == video_in_idx {
-            // Estimate PTS from DTS if unset, to avoid muxer warnings.
-            if unsafe { (*packet.as_ptr()).pts == ffi::AV_NOPTS_VALUE } {
-                unsafe { (*packet.as_mut_ptr()).pts = (*packet.as_ptr()).dts };
+            let raw_pts = unsafe { (*packet.as_ptr()).pts };
+            let raw_dts = unsafe { (*packet.as_ptr()).dts };
+            let raw_dur = unsafe { (*packet.as_ptr()).duration };
+            let raw_flags = unsafe { (*packet.as_ptr()).flags };
+            let is_key = raw_flags & (ffi::AV_PKT_FLAG_KEY as i32) != 0;
+            // Fill in PTS from DTS if only DTS is set.
+            if raw_pts == ffi::AV_NOPTS_VALUE && raw_dts != ffi::AV_NOPTS_VALUE {
+                unsafe { (*packet.as_mut_ptr()).pts = raw_dts };
             }
-            packet.set_stream_index(video_out_idx);
-            unsafe {
-                ffi::av_packet_rescale_ts(packet.as_mut_ptr(), video_time_base, video_out_tb);
+            let pts_now = unsafe { (*packet.as_ptr()).pts };
+            // Until we see the first keyframe, drop everything (post-
+            // seek leading packets aren't decodable alone). On each
+            // keyframe, advance the anchor — any packet whose pts is
+            // earlier is an open-GOP B-frame that references the
+            // previous GOP, which the fragment can't carry.
+            if is_key {
+                current_keyframe_pts = Some(pts_now);
+            } else {
+                match current_keyframe_pts {
+                    None => continue,
+                    Some(anchor) => {
+                        if pts_now != ffi::AV_NOPTS_VALUE && pts_now < anchor {
+                            continue;
+                        }
+                    }
+                }
             }
-            if let Err(e) = output.interleaved_write_frame(&mut packet) {
-                bail!("interleaved_write_frame (video): {e}");
+            if !video_dts_resolved {
+                if unsafe { (*packet.as_ptr()).dts } == ffi::AV_NOPTS_VALUE {
+                    pending_video.push(packet);
+                    continue;
+                }
+                // First packet with a real DTS — back-fill any queued
+                // earlier packets in decode order. They were emitted
+                // before this one, so their dts is strictly smaller.
+                let anchor_dts = unsafe { (*packet.as_ptr()).dts };
+                let step = if raw_dur > 0 { raw_dur } else { 1 };
+                let queue_len = pending_video.len() as i64;
+                for (i, p) in pending_video.iter_mut().enumerate() {
+                    let back = (queue_len - i as i64) * step;
+                    unsafe { (*p.as_mut_ptr()).dts = anchor_dts - back };
+                    if unsafe { (*p.as_ptr()).pts } == ffi::AV_NOPTS_VALUE {
+                        unsafe { (*p.as_mut_ptr()).pts = (*p.as_ptr()).dts };
+                    }
+                }
+                video_dts_resolved = true;
+                let queued: Vec<_> = pending_video.drain(..).collect();
+                for mut q in queued {
+                    write_video_packet(&mut q, &mut output, video_out_idx, video_time_base, video_out_tb)?;
+                }
             }
+            write_video_packet(&mut packet, &mut output, video_out_idx, video_time_base, video_out_tb)?;
         } else if pkt_stream_idx == audio_in_idx {
             if let Some(chain) = audio_chain.as_mut() {
                 process_audio_transcode(chain, &packet, &mut output, audio_out_idx, audio_out_tb)?;
             } else {
                 packet.set_stream_index(audio_out_idx);
                 unsafe {
-                    ffi::av_packet_rescale_ts(
-                        packet.as_mut_ptr(),
-                        audio_in_time_base,
-                        audio_out_tb,
-                    );
+                    ffi::av_packet_rescale_ts(packet.as_mut_ptr(), audio_in_time_base, audio_out_tb);
                 }
                 if let Err(e) = output.interleaved_write_frame(&mut packet) {
                     bail!("interleaved_write_frame (audio): {e}");
@@ -243,6 +306,23 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
     }
     let _ = output.write_trailer();
     writer.lock().unwrap().flush_remaining();
+    Ok(())
+}
+
+fn write_video_packet(
+    packet: &mut rsmpeg::avcodec::AVPacket,
+    output: &mut AVFormatContextOutput,
+    video_out_idx: i32,
+    video_in_tb: ffi::AVRational,
+    video_out_tb: ffi::AVRational,
+) -> Result<()> {
+    packet.set_stream_index(video_out_idx);
+    unsafe {
+        ffi::av_packet_rescale_ts(packet.as_mut_ptr(), video_in_tb, video_out_tb);
+    }
+    if let Err(e) = output.interleaved_write_frame(packet) {
+        bail!("interleaved_write_frame (video): {e}");
+    }
     Ok(())
 }
 
