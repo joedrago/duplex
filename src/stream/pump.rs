@@ -55,26 +55,32 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
     let video_time_base = input.streams().get(video_in_idx).unwrap().time_base;
     let audio_in_time_base = input.streams().get(audio_in_idx).unwrap().time_base;
 
-    if cfg.start_time > 0.0 {
-        let ts = (cfg.start_time / av_q2d(video_time_base)) as i64;
-        let seek_t0 = std::time::Instant::now();
-        unsafe {
-            let ret = ffi::av_seek_frame(
-                input.as_mut_ptr(),
-                video_in_idx as i32,
-                ts,
-                ffi::AVSEEK_FLAG_BACKWARD as i32,
-            );
-            if ret < 0 {
-                bail!("av_seek_frame failed: {ret}");
-            }
-        }
-        tracing::debug!(
-            seek_ms = seek_t0.elapsed().as_millis(),
-            start_time = cfg.start_time,
-            "seek complete"
+    // Always seek to the requested start, even when it's 0.
+    // `avformat_open_input` + `avformat_find_stream_info` advance the demuxer
+    // an arbitrary distance into the file (large for 4K HEVC where stream
+    // analysis chases the SPS through many packets) — without a fresh seek
+    // back, `read_packet` returns frames from wherever analysis left off,
+    // not from the start. Manifests itself as segment 0 containing PTS in
+    // the hundreds of seconds, which MSE buffers in the wrong place and the
+    // player stalls forever.
+    let seek_ts = (cfg.start_time.max(0.0) / av_q2d(video_time_base)) as i64;
+    let seek_t0 = std::time::Instant::now();
+    unsafe {
+        let ret = ffi::av_seek_frame(
+            input.as_mut_ptr(),
+            video_in_idx as i32,
+            seek_ts,
+            ffi::AVSEEK_FLAG_BACKWARD as i32,
         );
+        if ret < 0 {
+            bail!("av_seek_frame failed: {ret}");
+        }
     }
+    tracing::debug!(
+        seek_ms = seek_t0.elapsed().as_millis(),
+        start_time = cfg.start_time,
+        "seek complete"
+    );
 
     // Set up audio decoder + encoder + filter graph only when transcoding.
     let mut audio_chain = if cfg.transcode {
@@ -149,9 +155,28 @@ fn run_inner(cfg: Config, shared: &Arc<Shared>) -> Result<()> {
         audio_out_idx = out_stream.index;
     }
 
+    // movflags note: we deliberately leave OUT `delay_moov`. With delay_moov,
+    // the moov box is held until ffmpeg decides to write the first fragment,
+    // and on sources whose first stream-track is silent for many seconds
+    // (e.g. Nightcrawler — first audio packet is at PTS 25.6s) the muxer
+    // also coalesces the held-back video into a single huge fragment rather
+    // than honouring `frag_keyframe`. Writing the moov upfront lets each
+    // keyframe boundary close its own fragment immediately.
+    //
+    // max_interleave_delta=0 disables the interleave buffer entirely, so the
+    // muxer writes packets in the order we feed them without waiting for the
+    // other stream to catch up. Required for the same Nightcrawler-style
+    // case: otherwise the first ~25s of video sits in the interleave queue
+    // waiting for an audio packet that doesn't exist yet, and frag_keyframe
+    // never gets to fire.
     let opts = AVDictionary::new(
         &CString::new("movflags")?,
-        &CString::new("+empty_moov+delay_moov+frag_keyframe+default_base_moof+omit_tfhd_offset")?,
+        &CString::new("+empty_moov+frag_keyframe+default_base_moof+omit_tfhd_offset")?,
+        0,
+    )
+    .set(
+        &CString::new("max_interleave_delta")?,
+        &CString::new("0")?,
         0,
     );
     let mut opts_slot = Some(opts);
@@ -439,8 +464,12 @@ fn build_audio_chain(input: &AVFormatContextInput, audio_in_idx: usize) -> Resul
         sink_ctx.buffersink_set_frame_size(encoder_frame_size);
         sink_ctx.init_str(None).context("init abuffersink")?;
 
+        // aresample=first_pts=0 makes the resampler treat the output stream
+        // as starting at PTS 0 and pad any initial gap with silence — needed
+        // for sources whose first audio packet lands well after t=0 (see
+        // capability::audio_needs_transcode comment).
         let filter_spec = CString::new(
-            "pan=stereo|FL=1.0*FL+0.707*FC+0.707*SL+0.707*BL|FR=1.0*FR+0.707*FC+0.707*SR+0.707*BR,aresample=async=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
+            "pan=stereo|FL=1.0*FL+0.707*FC+0.707*SL+0.707*BL|FR=1.0*FR+0.707*FC+0.707*SR+0.707*BR,aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
         )?;
         let outputs = AVFilterInOut::new(&CString::new("in")?, &mut src_ctx, 0);
         let inputs = AVFilterInOut::new(&CString::new("out")?, &mut sink_ctx, 0);

@@ -84,6 +84,15 @@ pub struct Stream {
     pub tags: Option<HashMap<String, String>>,
     #[serde(default)]
     pub disposition: Option<HashMap<String, i32>>,
+
+    // PTS (seconds) of the *first packet* this stream emits, as observed by
+    // a packet-level scan. Distinct from ffprobe's stream-level
+    // `start_time`, which can claim 0.0 while the actual first packet is far
+    // later (Matroska files where the audio track is mastered to start mid-
+    // movie behave this way). Populated only for audio streams, since the
+    // current capability decision is the only consumer.
+    #[serde(default)]
+    pub first_packet_pts: Option<f64>,
 }
 
 impl Probe {
@@ -175,7 +184,76 @@ async fn run_ffprobe(ffprobe: &Path, file: &Path) -> Result<Probe> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let probe: Probe = serde_json::from_slice(&output.stdout)
+    let mut probe: Probe = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("parse ffprobe json for {}", file.display()))?;
+    annotate_first_audio_pts(ffprobe, file, &mut probe).await;
     Ok(probe)
+}
+
+// Second pass: find each audio stream's *first packet* PTS. Stream-level
+// metadata can claim start_time=0 while real packets begin many seconds in
+// (Matroska files mastered with a silent opening do this). The capability
+// decision uses this to switch from passthrough-mux to transcode so the
+// gap can be padded with silence — otherwise MSE stalls waiting for audio
+// that doesn't exist in the source.
+//
+// We scan only the first 60s of stream content. Anything farther in counts
+// as "definitely a gap" without needing a precise value.
+async fn annotate_first_audio_pts(ffprobe: &Path, file: &Path, probe: &mut Probe) {
+    let has_audio = probe.streams.iter().any(|s| s.codec_type == "audio");
+    if !has_audio {
+        return;
+    }
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-read_intervals",
+            "%+60",
+            "-show_entries",
+            "packet=stream_index,pts_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+    let Ok(output) = output else { return };
+    if !output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Track the minimum pts_time seen per stream index. Stream order in the
+    // file isn't guaranteed strictly ascending in PTS (interleaving), so we
+    // take the smallest, not just the first.
+    let mut earliest: HashMap<u32, f64> = HashMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.split(',');
+        let Some(idx) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(pts) = parts.next().and_then(|s| s.parse::<f64>().ok()) else {
+            continue;
+        };
+        earliest
+            .entry(idx)
+            .and_modify(|cur| {
+                if pts < *cur {
+                    *cur = pts;
+                }
+            })
+            .or_insert(pts);
+    }
+    for s in probe.streams.iter_mut() {
+        if s.codec_type == "audio" {
+            // If the stream isn't represented in the first 60s window at all,
+            // treat that as a >60s gap so the decision engine forces transcode.
+            s.first_packet_pts = Some(earliest.get(&s.index).copied().unwrap_or(60.0));
+        }
+    }
 }

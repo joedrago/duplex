@@ -161,6 +161,11 @@ fn resolve_audio_idx(probe: &Probe, requested: Option<u32>) -> Option<u32> {
     probe.audio_streams().next().map(|s| s.index)
 }
 
+// Threshold below which a "late" first audio packet is treated as on-time.
+// Some files have a few hundred ms of pre-roll silence in their first audio
+// packet; that's small enough for MSE to bridge without stalling.
+const AUDIO_GAP_TRANSCODE_THRESHOLD_SECS: f64 = 1.0;
+
 fn audio_needs_transcode(probe: &Probe, audio_idx: u32, decision: Decision) -> bool {
     if matches!(decision, Decision::HlsAudioTranscode) {
         return true;
@@ -169,6 +174,19 @@ fn audio_needs_transcode(probe: &Probe, audio_idx: u32, decision: Decision) -> b
     let Some(stream) = probe.streams.iter().find(|s| s.index == audio_idx) else {
         return true;
     };
+    // Source has a non-trivial audio gap at the start (e.g. Matroska files
+    // where the audio track is mastered to begin partway into the movie).
+    // MSE refuses to advance currentTime while the audio buffer is empty,
+    // so the only way to make playback usable from t=0 is to synthesize
+    // silence for the gap — which the transcode chain handles via
+    // `aresample=first_pts=0`.
+    if stream
+        .first_packet_pts
+        .map(|p| p > AUDIO_GAP_TRANSCODE_THRESHOLD_SECS)
+        .unwrap_or(false)
+    {
+        return true;
+    }
     !stream
         .codec_name
         .as_deref()
