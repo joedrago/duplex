@@ -203,179 +203,259 @@ async function renderBrowse(path) {
         app.replaceChildren(el("div", { className: "error" }, "browse failed: " + e.message))
         return
     }
-    const sections = el("div", { className: "browse-sections" })
     if (path === "") {
-        const cw = renderContinueWatching()
-        if (cw) sections.append(cw)
-        // Recently Added across libraries — fetched lazily; placeholder
-        // appended now and replaced when the response lands so the grid
-        // below renders immediately.
-        const recentSlot = el("div", { className: "browse-section recent-slot" })
-        sections.append(recentSlot)
-        fetchAndRenderRecent(recentSlot)
+        renderRoot(data)
+    } else {
+        renderSubdir(path, data)
     }
-    const grid = el("div", { className: "grid" })
-    const sortedEntries = sortEntries(data.entries, getSort())
-    const gridWrap = el("div", { className: "grid-wrap" }, grid)
-    // Alphabet rail: only worthwhile when the directory is long enough that
-    // scanning by name becomes annoying. The rail is grid-aware (jumps based
-    // on tile.dataset.name) so the Recent sort doesn't break it — letters
-    // simply jump to wherever the first matching tile ended up.
-    const ALPHABET_RAIL_THRESHOLD = 20
-    let rail = null
-    if (sortedEntries.length >= ALPHABET_RAIL_THRESHOLD) {
-        rail = buildAlphabetRail(sortedEntries, grid)
-        gridWrap.append(rail)
-    }
-    if (sortedEntries.length === 0) {
-        grid.append(el("p", null, "(empty directory)"))
-    }
-    for (const entry of sortedEntries) {
+}
+
+// Root view: three independently-scrollable columns side by side.
+// Continue Watching (from localStorage) | Recently Added (server-fetched) |
+// Libraries (the data.entries from /api/browse?path=).
+function renderRoot(data) {
+    const columns = el("div", { className: "columns columns-root" })
+
+    // Order: Libraries | Recently Added | Continue Watching.
+    // The Continue column's per-row ✕ button is the rightmost selectable on
+    // its row; putting Continue on the far right means Right past it lands
+    // nowhere instead of accidentally on a destructive button while the
+    // user is trying to cross from Recently Added.
+    columns.append(renderLibrariesColumn(data))
+
+    const recentList = el("ul", { className: "col-list" }, el("li", { className: "col-empty" }, "loading…"))
+    const recentCol = el("section", { className: "col col-recent" }, columnHeader("Recently Added"), recentList)
+    columns.append(recentCol)
+    fetchAndPopulateRecent(recentCol)
+
+    const continueCol = renderContinueColumn()
+    if (continueCol) columns.append(continueCol)
+
+    app.replaceChildren(columns)
+}
+
+// Subdir view: one full-width column with the directory listing + alphabet
+// rail on the right when the list is long enough to be worth navigating.
+function renderSubdir(path, data) {
+    const sorted = sortEntries(data.entries, getSort())
+    // Folders-first when sorting by name (conventional file-manager order).
+    // With Recent sort, dirs + files interleave by mtime so freshly-added
+    // content surfaces regardless of kind.
+    const ordered = getSort() === "recent" ? sorted : [...sorted].sort(folderFirst)
+
+    const list = el("ul", { className: "col-list" })
+    if (ordered.length === 0) list.append(el("li", { className: "col-empty" }, "(empty directory)"))
+    for (const entry of ordered) {
         const full = path ? path + "/" + entry.name : entry.name
-        if (entry.kind === "dir") {
-            const tile = el(
-                "a",
-                { className: "tile dir", href: "#/browse/" + encodePath(full) },
-                el("div", { className: "name" }, entry.name),
-                el("div", { className: "meta" }, `${entry.children} entries`)
-            )
-            tile.dataset.name = entry.name
-            grid.append(tile)
-        } else {
-            const meta = [`${prettySize(entry.size)}`]
-            if (entry.ext) meta.push(entry.ext)
-            const badge = entry.decision ? el("span", { className: "badge " + entry.decision }, entry.decision) : null
-            const tile = el(
-                "a",
-                { className: "tile file", href: "#/play/" + encodePath(full) },
-                el("div", { className: "name" }, entry.name, badge),
-                el("div", { className: "meta" }, meta.join(" · "))
-            )
-            tile.dataset.name = entry.name
-            grid.append(tile)
-        }
+        list.append(makeBrowseRow(entry, full))
     }
-    sections.append(gridWrap)
-    app.replaceChildren(sections)
-    grid.addEventListener("mouseover", (ev) => {
-        const tile = ev.target.closest(".tile")
-        if (tile) setSelection(null)
-    })
-    grid.addEventListener("click", (ev) => {
-        const tile = ev.target.closest(".tile")
-        if (!tile) return
+
+    const body = el("div", { className: "col-body" }, list)
+    const ALPHABET_RAIL_THRESHOLD = 20
+    if (ordered.length >= ALPHABET_RAIL_THRESHOLD) {
+        body.append(buildAlphabetRail(ordered, list))
+    }
+
+    const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
+    app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+
+    list.addEventListener("click", (ev) => {
+        const row = ev.target.closest(".col-row")
+        if (!row) return
         try {
-            localStorage.setItem("duplex.last:" + path, tile.dataset.name)
-            console.log(`[browse] saved last for "${path}": "${tile.dataset.name}"`)
+            localStorage.setItem("duplex.last:" + path, row.dataset.name)
         } catch (e) {
-            console.log(`[browse] failed to save last for "${path}":`, e)
+            void e
         }
     })
     try {
         const lastName = localStorage.getItem("duplex.last:" + path)
-        console.log(`[browse] restore last for "${path}":`, lastName)
         if (lastName) {
-            const tiles = grid.querySelectorAll(".tile")
-            let found = false
-            for (const t of tiles) {
-                if (t.dataset.name === lastName) {
-                    setSelection(t)
-                    found = true
+            for (const r of list.querySelectorAll(".col-row")) {
+                if (r.dataset.name === lastName) {
+                    setSelection(r.querySelector(".row-link") || r)
                     break
                 }
             }
-            console.log(`[browse] setSelection for "${lastName}":`, found ? "found" : "not found")
         }
     } catch (e) {
-        console.log(`[browse] failed to restore last for "${path}":`, e)
+        void e
     }
 }
 
-// Build the "Continue Watching" row from the resume map. Returns null if
-// nothing to show (no resumed items) so the caller can omit the section
-// entirely instead of rendering a sad empty header.
-function renderContinueWatching() {
-    const m = readResumeMap()
-    const items = Object.entries(m)
-        .map(([vpath, info]) => ({ vpath, ...info }))
-        .filter((it) => isFinite(it.pos) && isFinite(it.dur) && it.dur > 0)
-        .sort((a, b) => (b.at || 0) - (a.at || 0))
+function folderFirst(a, b) {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1
+    return a.name.localeCompare(b.name)
+}
+
+function basenameOf(path) {
+    if (!path) return ""
+    const parts = path.split("/").filter(Boolean)
+    return parts[parts.length - 1] || ""
+}
+
+function columnHeader(title) {
+    return el("h2", { className: "col-header" }, title)
+}
+
+// One browse-listing row used in subdir view and the Libraries column.
+function makeBrowseRow(entry, vpath) {
+    const isDir = entry.kind === "dir"
+    const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
+    const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
+    const name = el("div", { className: "row-name" }, entry.name)
+    if (!isDir && entry.decision) name.append(el("span", { className: "badge " + entry.decision }, entry.decision))
+    const metaParts = isDir
+        ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
+        : [prettySize(entry.size), entry.ext].filter(Boolean)
+    const meta = el("div", { className: "row-meta" }, metaParts.join(" · "))
+    const link = el(
+        "a",
+        { className: "row-link" + (isDir ? " row-dir" : " row-file"), href },
+        icon,
+        el("div", { className: "row-text" }, name, meta)
+    )
+    const row = el("li", { className: "col-row" }, link)
+    row.dataset.name = entry.name
+    return row
+}
+
+// "Continue Watching" column: vertical list of rows, each with a small
+// inline "✕" remove button. Returns null when the resume map is empty so
+// the root view can omit the column entirely.
+function renderContinueColumn() {
+    const items = continueItems()
     if (items.length === 0) return null
 
-    const row = el("div", { className: "cw-row" })
-    const section = el(
-        "section",
-        { className: "browse-section continue-watching" },
-        el("h2", { className: "section-title" }, "Continue Watching"),
-        row
-    )
+    const list = el("ul", { className: "col-list" })
+    const section = el("section", { className: "col col-continue" }, columnHeader("Continue Watching"), list)
+
+    const rebuild = () => {
+        const fresh = renderContinueColumn()
+        if (fresh) {
+            section.replaceWith(fresh)
+            const first = fresh.querySelector(".row-link")
+            if (first) setSelection(first)
+        } else {
+            section.remove()
+            const next = document.querySelector(".col-recent .row-link, .col-libraries .row-link")
+            if (next) setSelection(next)
+        }
+    }
 
     for (const it of items) {
         const basename = it.vpath.split("/").pop() || it.vpath
         const remaining = Math.max(0, it.dur - it.pos)
         const pct = Math.max(0, Math.min(100, (it.pos / it.dur) * 100))
-        const progress = el(
-            "div",
-            { className: "cw-progress" },
-            el("div", { className: "cw-progress-fill", style: `width:${pct.toFixed(1)}%` })
-        )
-        const tile = el(
+        const link = el(
             "a",
-            { className: "tile cw-tile", href: "#/play/" + encodePath(it.vpath) },
-            el("div", { className: "name" }, basename),
-            el("div", { className: "meta" }, `${fmtTime(remaining)} left`),
-            progress
+            { className: "row-link row-file", href: "#/play/" + encodePath(it.vpath) },
+            el("span", { className: "row-icon" }, "🎬"),
+            el(
+                "div",
+                { className: "row-text" },
+                el("div", { className: "row-name" }, basename),
+                el("div", { className: "row-meta" }, `${fmtTime(remaining)} left`)
+            ),
+            el(
+                "div",
+                { className: "row-progress" },
+                el("div", { className: "row-progress-fill", style: `width:${pct.toFixed(1)}%` })
+            )
         )
-        tile.dataset.name = basename
-
-        const removeBtn = el("button", { className: "cw-remove", type: "button", title: "Forget this position" }, "✕ Remove")
+        const removeBtn = el(
+            "button",
+            { className: "row-action", type: "button", title: "Forget this position", "aria-label": "Forget" },
+            "✕"
+        )
         removeBtn.addEventListener("click", (ev) => {
             ev.preventDefault()
             ev.stopPropagation()
             clearResume(it.vpath)
-            // Re-render the section in place; if it becomes empty, drop it.
-            const fresh = renderContinueWatching()
-            if (fresh) {
-                section.replaceWith(fresh)
-                // Restore selection to the equivalent position in the new row.
-                const nextSel = fresh.querySelector(".cw-tile, .cw-remove")
-                if (nextSel) setSelection(nextSel)
-            } else {
-                section.remove()
-                // Selection landed on the grid below; pick the first selectable.
-                const fallback = document.querySelector(".grid .tile")
-                if (fallback) setSelection(fallback)
-            }
+            rebuild()
         })
-
-        const card = el("div", { className: "cw-card" }, tile, removeBtn)
-        row.append(card)
+        const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
+        row.dataset.name = basename
+        list.append(row)
     }
     return section
 }
 
-// Bucket an entry name's first character into one of 27 buckets so the rail
-// can present "#" (digits/symbols) + "A".."Z" and quickly map a letter to
-// matching tiles. Non-ASCII letters fall into "#"; mostly a no-op for
-// English-named libraries but keeps the rail honest about coverage.
+function continueItems() {
+    const m = readResumeMap()
+    return Object.entries(m)
+        .map(([vpath, info]) => ({ vpath, ...info }))
+        .filter((it) => isFinite(it.pos) && isFinite(it.dur) && it.dur > 0)
+        .sort((a, b) => (b.at || 0) - (a.at || 0))
+}
+
+async function fetchAndPopulateRecent(col) {
+    let data
+    try {
+        data = await getJSON("/api/recent?limit=30")
+    } catch (e) {
+        console.warn("[recent] fetch failed", e)
+        col.remove()
+        return
+    }
+    const list = col.querySelector(".col-list")
+    if (!data.items || data.items.length === 0) {
+        list.replaceChildren(el("li", { className: "col-empty" }, "Nothing new"))
+        return
+    }
+    list.replaceChildren()
+    for (const it of data.items) {
+        const parts = it.vpath.split("/")
+        const basename = parts.pop()
+        const parent = parts.join(" / ")
+        const link = el(
+            "a",
+            { className: "row-link row-file", href: "#/play/" + encodePath(it.vpath) },
+            el("span", { className: "row-icon" }, "🎬"),
+            el(
+                "div",
+                { className: "row-text" },
+                parent ? el("div", { className: "row-context" }, parent) : null,
+                el("div", { className: "row-name" }, basename),
+                el("div", { className: "row-meta" }, `${prettySize(it.size)} · ${formatRelative(it.mtime)}`)
+            )
+        )
+        const row = el("li", { className: "col-row" }, link)
+        row.dataset.name = basename
+        list.append(row)
+    }
+}
+
+function renderLibrariesColumn(data) {
+    const sorted = sortEntries(data.entries, getSort())
+    const list = el("ul", { className: "col-list" })
+    if (sorted.length === 0) list.append(el("li", { className: "col-empty" }, "No libraries"))
+    for (const entry of sorted) {
+        list.append(makeBrowseRow(entry, entry.name))
+    }
+    return el("section", { className: "col col-libraries" }, columnHeader("Libraries"), list)
+}
+
+// Bucket an entry name's first character into "#"+A..Z so the rail can map
+// a letter to matching rows quickly. Non-ASCII letters fall into "#".
 function firstLetterBucket(name) {
     const c = (name || "").trimStart().charAt(0).toUpperCase()
     if (c >= "A" && c <= "Z") return c
     return "#"
 }
 
-function buildAlphabetRail(entries, grid) {
+function buildAlphabetRail(entries, list) {
     const LETTERS = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
     const presentSet = new Set(entries.map((e) => firstLetterBucket(e.name)))
     const rail = el("aside", { className: "alphabet-rail", role: "navigation" })
 
     const jumpTo = (letter) => {
-        // Find the first tile whose name falls into this letter bucket.
-        const tiles = grid.querySelectorAll(".tile")
-        for (const t of tiles) {
-            if (firstLetterBucket(t.dataset.name) === letter) {
-                t.scrollIntoView({ block: "center", behavior: "smooth" })
-                setSelection(t)
+        const rows = list.querySelectorAll(".col-row")
+        for (const r of rows) {
+            if (firstLetterBucket(r.dataset.name) === letter) {
+                r.scrollIntoView({ block: "center", behavior: "smooth" })
+                const link = r.querySelector(".row-link")
+                if (link) setSelection(link)
                 return
             }
         }
@@ -395,39 +475,6 @@ function buildAlphabetRail(entries, grid) {
         rail.append(btn)
     }
     return rail
-}
-
-async function fetchAndRenderRecent(slot) {
-    let data
-    try {
-        data = await getJSON("/api/recent?limit=10")
-    } catch (e) {
-        console.warn("[recent] fetch failed", e)
-        slot.remove()
-        return
-    }
-    if (!data.items || data.items.length === 0) {
-        slot.remove()
-        return
-    }
-    const row = el("div", { className: "recent-row" })
-    for (const it of data.items) {
-        // Parent directory shown as small context above the filename so the
-        // user can tell "TestLibrary/TV/Show1/Ep01" from "Movies/Movie1".
-        const parts = it.vpath.split("/")
-        const basename = parts.pop()
-        const parent = parts.join(" / ")
-        const tile = el(
-            "a",
-            { className: "tile recent-tile", href: "#/play/" + encodePath(it.vpath) },
-            parent ? el("div", { className: "tile-context" }, parent) : null,
-            el("div", { className: "name" }, basename),
-            el("div", { className: "meta" }, `${prettySize(it.size)} · ${formatRelative(it.mtime)}`)
-        )
-        tile.dataset.name = basename
-        row.append(tile)
-    }
-    slot.replaceChildren(el("h2", { className: "section-title" }, "Recently Added"), row)
 }
 
 function formatRelative(epochSec) {
@@ -469,15 +516,15 @@ function teardownPlayer() {
     window.duplexPlayer = null
 }
 
-// tvOS-style remote handler — only installed when IS_TV is set so the
-// browser experience stays mouse/click/spacebar driven. All keys are
-// consumed here (no spatial nav inside the player). Layout:
-//   • OK / Space / Enter → play/pause
+// Couch-first remote handler. Always installed in the player view; the
+// browser experience uses the exact same key model (it also still responds
+// to mouse / spacebar / hover via attachPlayerControls). Layout:
+//   • OK / Space / Enter → play/pause (unless something more specific is selected)
 //   • Left / Right       → seek ±10s
 //   • Up                 → subtitle picker
 //   • Down               → audio picker (falls back to subs if single track)
 //   • Escape (= Menu)    → close picker if open, else back to browse
-function installPlayerRemoteHandler({ video, stage, _playBtn, subSelect, audioSelect }) {
+function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPicker }) {
     const SEEK_SECONDS = 10
     const showOSD = stage.__duplexShowOSD
 
@@ -492,52 +539,6 @@ function installPlayerRemoteHandler({ video, stage, _playBtn, subSelect, audioSe
         const wasPaused = video.paused
         wasPaused ? video.play() : video.pause()
         console.log(`[player] toggle play: paused ${wasPaused} -> ${!wasPaused} at t=${video.currentTime.toFixed(2)}`)
-    }
-
-    const pickerOptionsFromSelect = (sel) =>
-        Array.from(sel.options).map((o) => ({ value: o.value, label: o.textContent || o.value }))
-
-    const openSubsPicker = () => {
-        if (!subSelect) return
-        const options = pickerOptionsFromSelect(subSelect)
-        const current = Math.max(
-            0,
-            options.findIndex((o) => o.value === subSelect.value)
-        )
-        openPicker({
-            title: "Subtitles",
-            options,
-            currentIndex: current,
-            onSelect: (opt) => {
-                subSelect.value = opt.value
-                subSelect.dispatchEvent(new Event("change"))
-                console.log(`[player] subs set: ${opt.value || "off"}`)
-            }
-        })
-    }
-
-    const openAudioPicker = () => {
-        if (!audioSelect) {
-            // No multi-track audio menu — fall back to subs so Down still
-            // does something useful instead of being a dead key.
-            openSubsPicker()
-            return
-        }
-        const options = pickerOptionsFromSelect(audioSelect)
-        const current = Math.max(
-            0,
-            options.findIndex((o) => o.value === audioSelect.value)
-        )
-        openPicker({
-            title: "Audio",
-            options,
-            currentIndex: current,
-            onSelect: (opt) => {
-                audioSelect.value = opt.value
-                audioSelect.dispatchEvent(new Event("change"))
-                console.log(`[player] audio set: ${opt.value}`)
-            }
-        })
     }
 
     const handleKey = (ev) => {
@@ -808,20 +809,23 @@ async function renderPlay(path) {
     const video = el("video", { playsInline: true, autoplay: true })
     const cueOverlay = el("div", { className: "cue-overlay" })
 
-    const subOpts = [el("option", { value: "" }, "subtitles: off")]
+    // Subtitle options. Always include "Off" as the first entry so the
+    // picker has somewhere to land. Sidecars and text-format embedded
+    // streams are both surfaced; image-format embedded streams are skipped
+    // (we have no renderer for PGS/VobSub on the web client).
+    const subOptions = [{ value: "", label: "Off" }]
     info.sidecars?.forEach((s, i) => {
-        subOpts.push(el("option", { value: "sidecar:" + i }, `${s.language || "?"} (sidecar ${s.format})`))
+        subOptions.push({ value: "sidecar:" + i, label: `${s.language || "?"} (sidecar ${s.format})` })
     })
     info.embedded_subs?.forEach((s) => {
         if (s.format === "text") {
-            subOpts.push(el("option", { value: "embedded:" + s.index }, `${s.language || "?"} (embedded ${s.codec || "text"})`))
+            subOptions.push({ value: "embedded:" + s.index, label: `${s.language || "?"} (embedded ${s.codec || "text"})` })
         }
     })
-    const subSelect = el("select", { className: "ctrl-subs", title: "subtitles" }, ...subOpts)
 
-    // Audio track dropdown — only when HLS is in play and there's more than
-    // one track. Direct-play uses the raw file and the browser picks audio;
-    // we can't switch tracks server-side in that mode.
+    // Audio options. Only meaningful when HLS is in play and there's more
+    // than one track — direct play hands the raw file to the browser and we
+    // can't switch tracks server-side from there.
     const audioTracks = info.audio_tracks ?? []
     const initialAudioIdx = (() => {
         const enTrack = audioTracks.find((a) => {
@@ -830,19 +834,17 @@ async function renderPlay(path) {
         })
         return (enTrack || audioTracks[0])?.index
     })()
-    const audioSelect =
+    const audioOptions =
         info.decision !== "direct" && audioTracks.length > 1
-            ? el(
-                  "select",
-                  { className: "ctrl-audio", title: "audio track" },
-                  ...audioTracks.map((a, i) => {
-                      const lang = a.language || `audio ${i + 1}`
-                      const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
-                      const ch = chInfo ? ` (${chInfo})` : ""
-                      return el("option", { value: a.index, selected: a.index === initialAudioIdx }, `${lang}${ch}`)
-                  })
-              )
-            : null
+            ? audioTracks.map((a, i) => {
+                  const lang = a.language || `audio ${i + 1}`
+                  const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
+                  const ch = chInfo ? ` (${chInfo})` : ""
+                  return { value: String(a.index), label: `${lang}${ch}` }
+              })
+            : []
+
+    const labelFor = (opts, val) => opts.find((o) => o.value === val)?.label ?? "?"
 
     const playBtn = el("button", { className: "ctrl-btn ctrl-play", title: "play/pause" }, "▶")
     const scrub = el("input", { type: "range", className: "ctrl-scrub", min: "0", max: "100", step: "any", value: "0" })
@@ -873,6 +875,19 @@ async function renderPlay(path) {
     })
     const fsBtn = el("button", { className: "ctrl-btn ctrl-fs", title: "fullscreen" }, "⛶")
 
+    // Picker-opening buttons replace the old inline <select> dropdowns.
+    // One UI everywhere: click on desktop, OK on remote, both pop the same
+    // modal picker that already exists for tvOS.
+    const subBtn = el("button", { className: "ctrl-subs", type: "button", title: "Subtitles" }, "CC Off")
+    const audioBtn =
+        audioOptions.length > 0
+            ? el(
+                  "button",
+                  { className: "ctrl-audio", type: "button", title: "Audio" },
+                  "♪ " + labelFor(audioOptions, String(initialAudioIdx))
+              )
+            : null
+
     const controlBar = el(
         "div",
         { className: "player-controls" },
@@ -881,17 +896,30 @@ async function renderPlay(path) {
         timeDisplay,
         muteBtn,
         volumeSlider,
-        audioSelect,
-        subSelect,
+        audioBtn,
+        subBtn,
         fsBtn
     )
 
-    const stage = el("div", { className: "player-stage" }, video, cueOverlay, controlBar)
+    // Top-left back button. The page header is hidden during playback so the
+    // crumb/home link is gone — without this, a mouse-only user has no way
+    // out of a video (and no reason to guess that Esc works). LRUD users can
+    // reach it via spatial nav too, but Menu/Escape is the faster path for
+    // them.
+    const backBtn = el("button", { className: "ctrl-back", type: "button", title: "Back", "aria-label": "Back" }, "← Back")
+    backBtn.addEventListener("click", (ev) => {
+        ev.preventDefault()
+        if (history.length > 1) history.back()
+        else location.hash = "#/browse/"
+    })
+
+    const stage = el("div", { className: "player-stage" }, video, cueOverlay, backBtn, controlBar)
     const wrap = el("div", { className: "player" }, stage, detailsBlock(info))
     app.replaceChildren(wrap)
 
     const masterUrlFor = (audioIdx) => `${info.urls.master}${audioIdx !== undefined ? `?audio=${audioIdx}` : ""}`
     let currentAudio = initialAudioIdx
+    let currentSubValue = ""
 
     if (info.decision === "direct") {
         video.src = info.urls.raw
@@ -912,65 +940,24 @@ async function renderPlay(path) {
         return
     }
 
-    if (audioSelect) {
-        audioSelect.addEventListener("change", () => {
-            const audioIdx = parseInt(audioSelect.value, 10)
-            if (audioIdx === currentAudio) {
-                console.log(`[audio] no-op: track ${audioIdx} already active`)
-                return
-            }
-            const curTime = video.currentTime
-            const wasPlaying = !video.paused
-            console.log(
-                `[audio] switch: ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)} (wasPlaying=${wasPlaying}, native=${!activeHls})`
-            )
-            currentAudio = audioIdx
-            if (activeRecovery) activeRecovery.notePosition(curTime)
-            const newUrl = masterUrlFor(audioIdx)
-            if (activeHls) {
-                activeHls.loadSource(newUrl)
-            } else {
-                // Native HLS path (Safari, tvOS UIWebView) — no MSE, so we
-                // can't swap audio tracks via the Hls.js API; reload the
-                // master playlist with the new query param and seek back.
-                video.src = newUrl
-                video.load()
-            }
-            video.addEventListener("canplay", function onCanPlay() {
-                video.removeEventListener("canplay", onCanPlay)
-                console.log(`[audio] canplay -> restore t=${curTime.toFixed(2)} play=${wasPlaying}`)
-                video.currentTime = curTime
-                if (wasPlaying) video.play()
-            })
-        })
-    }
-
-    video.volume = initVolume
-    video.muted = savedMuted
-    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path })
-    // tvOS-style remote handling is opt-in via the `IS_TV` flag the native
-    // wrapper sets after page load. In a browser, leave window.duplexPlayer
-    // unset so the keydown handler falls through to ordinary spatial nav
-    // and the existing mouse/spacebar OSD behavior keeps working unchanged.
-    if (window.IS_TV) {
-        installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSelect })
-    }
-
-    subSelect.addEventListener("change", () => {
+    // Apply a subtitle choice: tear down any existing <track>, then mount
+    // the new one in `hidden` mode so the browser fires cuechange events
+    // we can intercept and paint into our own .cue-overlay (the native
+    // rendering ignores our font-size + stage-anchored positioning).
+    const applySubChoice = (value) => {
+        currentSubValue = value
+        const label = value ? labelFor(subOptions, value) : "Off"
+        subBtn.textContent = "CC " + label
         ;[...video.querySelectorAll("track")].forEach((t) => t.remove())
         cueOverlay.textContent = ""
-        const val = subSelect.value
-        if (!val) return
+        if (!value) return
         const t = document.createElement("track")
         t.kind = "subtitles"
         t.default = true
-        t.label = subSelect.selectedOptions[0].textContent
-        t.src = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(val)}`
+        t.label = label
+        t.src = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`
         t.srclang = "en"
         video.append(t)
-        // Switch the track to `hidden` so the browser stops painting cues on
-        // the video itself; we render them into the cueOverlay anchored to
-        // the stage instead. The cuechange event still fires in hidden mode.
         setTimeout(() => {
             ;[...video.textTracks].forEach((tt) => {
                 tt.mode = "hidden"
@@ -980,7 +967,75 @@ async function renderPlay(path) {
                 }
             })
         }, 50)
-    })
+    }
+
+    // Apply an audio choice: hls.js gets a new master URL; native HLS
+    // (Safari, tvOS UIWebView) can't swap tracks via API so we reload the
+    // whole source with the audio query param and seek back to position.
+    const applyAudioChoice = (value) => {
+        const audioIdx = parseInt(value, 10)
+        if (audioIdx === currentAudio) return
+        const curTime = video.currentTime
+        const wasPlaying = !video.paused
+        console.log(`[audio] switch ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)}`)
+        currentAudio = audioIdx
+        if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, value)
+        if (activeRecovery) activeRecovery.notePosition(curTime)
+        const newUrl = masterUrlFor(audioIdx)
+        if (activeHls) {
+            activeHls.loadSource(newUrl)
+        } else {
+            video.src = newUrl
+            video.load()
+        }
+        video.addEventListener("canplay", function onCanPlay() {
+            video.removeEventListener("canplay", onCanPlay)
+            video.currentTime = curTime
+            if (wasPlaying) video.play()
+        })
+    }
+
+    const openSubsPicker = () => {
+        const idx = Math.max(
+            0,
+            subOptions.findIndex((o) => o.value === currentSubValue)
+        )
+        openPicker({
+            title: "Subtitles",
+            options: subOptions,
+            currentIndex: idx,
+            onSelect: (opt) => applySubChoice(opt.value)
+        })
+    }
+
+    const openAudioPicker = () => {
+        if (audioOptions.length === 0) {
+            openSubsPicker()
+            return
+        }
+        const idx = Math.max(
+            0,
+            audioOptions.findIndex((o) => o.value === String(currentAudio))
+        )
+        openPicker({
+            title: "Audio",
+            options: audioOptions,
+            currentIndex: idx,
+            onSelect: (opt) => applyAudioChoice(opt.value)
+        })
+    }
+
+    subBtn.addEventListener("click", openSubsPicker)
+    if (audioBtn) audioBtn.addEventListener("click", openAudioPicker)
+
+    video.volume = initVolume
+    video.muted = savedMuted
+    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path })
+    // One UI everywhere — couch-first. Arrow keys always seek; Up/Down
+    // always open the sub/audio pickers; OK on the focused element fires
+    // its click. Mouse / hover / wheel still work because the controls are
+    // real elements with their own click handlers.
+    installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPicker })
 }
 
 // Wires every custom control to the <video> element and handles
@@ -1150,30 +1205,24 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     }
     document.addEventListener("keydown", onKey)
 
+    // OSD auto-hide. Same policy everywhere: a fixed dwell after the last
+    // input or paint, then dim and drop selection. Mouse moves / hover /
+    // pause / remote presses all re-surface via showControls. The video's
+    // `paused` flag can't be trusted (UIWebView reports stale `true` while
+    // audio/video keep advancing) so the timer fires regardless.
     let hideTimer = null
-    const isTv = !!window.IS_TV
-    // TV gets a longer dwell so the user can read what's selected; desktop
-    // stays snappy.
-    const HIDE_MS = isTv ? 4000 : 2500
+    const HIDE_MS = 3500
     const showControls = () => {
         stage.classList.add("show-controls")
         if (hideTimer) {
             clearTimeout(hideTimer)
             hideTimer = null
         }
-        // On TV we always auto-hide. UIWebView reports video.paused
-        // unreliably (often stale `true` even while audio/video keep
-        // playing), so keying the hide on !video.paused would leave the OSD
-        // up forever. The user can re-surface controls with Up/Down.
-        // In a real browser, defer to the actual paused state so the OSD
-        // stays put while genuinely paused.
-        if (isTv || !video.paused) {
-            hideTimer = setTimeout(() => {
-                stage.classList.remove("show-controls")
-                const sel = document.querySelector(".selected")
-                if (sel) sel.classList.remove("selected")
-            }, HIDE_MS)
-        }
+        hideTimer = setTimeout(() => {
+            stage.classList.remove("show-controls")
+            const sel = document.querySelector(".selected")
+            if (sel) sel.classList.remove("selected")
+        }, HIDE_MS)
     }
     stage.addEventListener("mousemove", showControls)
     stage.addEventListener("mouseenter", showControls)
@@ -1181,9 +1230,8 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
         if (!video.paused) stage.classList.remove("show-controls")
     })
     video.addEventListener("pause", showControls)
-    // On TV start with the OSD hidden so the user sees the video full-bleed.
-    // Any remote press surfaces it via installPlayerRemoteHandler.
-    if (!isTv) showControls()
+    // Start with the OSD hidden so the video opens full-bleed; any input
+    // surfaces it. The remote handler calls showOSD on every keypress.
 
     // Expose hooks the player keydown handler needs.
     stage.__duplexShowOSD = showControls

@@ -157,9 +157,9 @@ static const NSTimeInterval kReconnectIntervalSeconds = 30.0;
     // Re-inject on every finish: SPA route changes don't fire this, but full
     // navigations / reloads do, and we need the hook in the new document.
     [self evaluateJavaScript:[self consoleHookJS]];
-    // Mark the page as running inside the tvOS host. CSS keys layout
-    // changes off `.tv-mode`; JS keys remote-friendly behaviors off it too.
-    [self evaluateJavaScript:@"document.documentElement.classList.add('tv-mode'); window.IS_TV = true; console.log('[hook] tv-mode flag set');"];
+    // (The web client is now couch-first by default — every device gets the
+    // same chunky TV-style UI. We used to set `tv-mode` + `IS_TV` here to
+    // diverge layouts; that's been removed.)
     NSLog(@"[Duplex] JS console hook injected into %@", currentURL);
 
     // If the *target* URL successfully loaded, kill any pending reconnect —
