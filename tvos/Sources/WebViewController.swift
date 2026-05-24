@@ -8,7 +8,7 @@ import MediaPlayer
 class WebViewController: UIViewController {
     private var tvWebView: TVWebView!
     private var lastSeekTime: TimeInterval = 0
-    private static let seekThrottleInterval: TimeInterval = 0.5
+    private static let seekThrottleInterval: TimeInterval = 0.15
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
         return [tvWebView]
@@ -51,10 +51,12 @@ class WebViewController: UIViewController {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
-            // Menu reloads the page (back-to-browse behavior).
+            // Menu surfaces in JS as Escape. The web app handles it:
+            // close an open picker if any, otherwise navigate back.
             if press.type == .menu {
-                NSLog("[Duplex] press: MENU -> history.back/reload")
-                tvWebView.evaluateJavaScript("history.length > 1 ? history.back() : location.reload();")
+                NSLog("[Duplex] press: MENU -> dispatch Escape")
+                injectKeyEvent("keydown", key: "Escape")
+                injectKeyEvent("keyup", key: "Escape")
                 return
             }
             if let key = keyForPress(press) {
@@ -100,14 +102,41 @@ class WebViewController: UIViewController {
     }
 
     private func injectKeyEvent(_ type: String, key: String) {
+        // Set every key-identification property the page might check —
+        // UIWebView's WebKit predates `key`/`code` being universally read.
+        let keyCode: Int
+        let code: String
+        switch key {
+        case "ArrowUp":    keyCode = 38; code = "ArrowUp"
+        case "ArrowDown":  keyCode = 40; code = "ArrowDown"
+        case "ArrowLeft":  keyCode = 37; code = "ArrowLeft"
+        case "ArrowRight": keyCode = 39; code = "ArrowRight"
+        case " ":          keyCode = 32; code = "Space"
+        case "Escape":     keyCode = 27; code = "Escape"
+        default:           keyCode = 0;  code = ""
+        }
         let js = """
             (function() {
                 try {
-                    var evt = new KeyboardEvent('\(type)', {key:'\(key)', bubbles:true});
-                    var target = document.activeElement || document;
-                    target.dispatchEvent(evt);
+                    var k = '\(key)';
+                    console.log('[inject] \(type) key=' + JSON.stringify(k) + ' code=\(code) keyCode=\(keyCode) activeTag=' + (document.activeElement && document.activeElement.tagName));
+                    var init = {key: k, code: '\(code)', keyCode: \(keyCode), which: \(keyCode), bubbles: true, cancelable: true};
+                    var evt;
+                    try { evt = new KeyboardEvent('\(type)', init); }
+                    catch (e) {
+                        evt = document.createEvent('KeyboardEvent');
+                        evt.initEvent('\(type)', true, true);
+                    }
+                    // Some older WebKits ignore init-dict and require defineProperty.
+                    try { Object.defineProperty(evt, 'key',     {get: function(){return k;}}); } catch(_) {}
+                    try { Object.defineProperty(evt, 'code',    {get: function(){return '\(code)';}}); } catch(_) {}
+                    try { Object.defineProperty(evt, 'keyCode', {get: function(){return \(keyCode);}}); } catch(_) {}
+                    try { Object.defineProperty(evt, 'which',   {get: function(){return \(keyCode);}}); } catch(_) {}
+                    // Dispatch once at the document level — listeners
+                    // registered with capture:true see it first, and bubbling
+                    // back from a deeper target would double-fire them.
                     document.dispatchEvent(evt);
-                } catch(e) {}
+                } catch(e) { console.error('[inject] failed: ' + e); }
             })();
             """
         tvWebView.evaluateJavaScript(js)

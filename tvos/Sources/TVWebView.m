@@ -5,13 +5,31 @@
 // JS bridge — this is the standard workaround).
 static NSString *const DuplexLogScheme = @"duplex-log";
 
+// Wait this long before retrying after a failed connection attempt.
+static const NSTimeInterval kReconnectIntervalSeconds = 30.0;
+
 @interface TVWebView ()
 - (NSString *)consoleHookJS;
 - (NSString *)currentURLStringForWebView:(id)webView;
+- (void)showStatusPageWithError:(NSError *)error;
+- (void)scheduleReconnect;
+- (BOOL)errorIsRetryable:(NSError *)error;
+- (NSString *)htmlEscape:(NSString *)s;
 @end
 
 @implementation TVWebView {
     UIView *_webView;
+
+    // Target URL is the "real" page we want to host. We re-attempt it on
+    // failure; the status page loads under about:blank so we can tell the
+    // two apart in the delegate callbacks.
+    NSURL *_targetURL;
+
+    // Incremented every time we schedule a reconnect. A pending dispatch_after
+    // block captures the value it was given and bails if it no longer matches —
+    // that's how we cancel superseded retries (e.g. when loadURL is called
+    // manually or a previous attempt succeeded).
+    NSUInteger _reconnectToken;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -75,6 +93,10 @@ static NSString *const DuplexLogScheme = @"duplex-log";
         NSLog(@"[Duplex] loadURL aborted — url is nil");
         return;
     }
+    _targetURL = url;
+    // Bumping the token invalidates any in-flight reconnect timer so a manual
+    // reload doesn't get clobbered by a late retry.
+    _reconnectToken++;
     NSLog(@"[Duplex] loadURL: %@", url.absoluteString);
     NSURLRequest *request = [NSURLRequest requestWithURL:url];
     SEL loadSel = NSSelectorFromString(@"loadRequest:");
@@ -135,14 +157,39 @@ static NSString *const DuplexLogScheme = @"duplex-log";
     // Re-inject on every finish: SPA route changes don't fire this, but full
     // navigations / reloads do, and we need the hook in the new document.
     [self evaluateJavaScript:[self consoleHookJS]];
+    // Mark the page as running inside the tvOS host. CSS keys layout
+    // changes off `.tv-mode`; JS keys remote-friendly behaviors off it too.
+    [self evaluateJavaScript:@"document.documentElement.classList.add('tv-mode'); window.IS_TV = true; console.log('[hook] tv-mode flag set');"];
     NSLog(@"[Duplex] JS console hook injected into %@", currentURL);
+
+    // If the *target* URL successfully loaded, kill any pending reconnect —
+    // ignore finishes for the about:blank status page.
+    if (_targetURL && [currentURL isEqualToString:_targetURL.absoluteString]) {
+        _reconnectToken++;
+        NSLog(@"[Duplex] Target URL reached — pending reconnects cancelled");
+    }
 }
 
 - (void)webView:(id)webView didFailLoadWithError:(NSError *)error {
     // -999 (NSURLErrorCancelled) routinely fires when a new nav supersedes
-    // an in-flight one — noise, but useful to see during real failures.
+    // an in-flight one — noise, never schedule a retry on it.
     NSLog(@"[Duplex] webView didFailLoadWithError domain=%@ code=%ld desc=%@ userInfo=%@",
           error.domain, (long)error.code, error.localizedDescription, error.userInfo);
+
+    if (![self errorIsRetryable:error]) {
+        return;
+    }
+
+    // Only retry if the failure was for the main target URL. Sub-resource
+    // failures shouldn't drag us back to a status screen.
+    NSString *failingURL = error.userInfo[@"NSErrorFailingURLStringKey"] ?: error.userInfo[NSURLErrorFailingURLStringErrorKey];
+    if (failingURL && _targetURL && ![failingURL isEqualToString:_targetURL.absoluteString]) {
+        NSLog(@"[Duplex] Failure was for sub-resource (%@), not target — no reconnect", failingURL);
+        return;
+    }
+
+    [self showStatusPageWithError:error];
+    [self scheduleReconnect];
 }
 
 #pragma mark - Helpers
@@ -154,6 +201,89 @@ static NSString *const DuplexLogScheme = @"duplex-log";
     } @catch (NSException *e) {
         return @"?";
     }
+}
+
+- (BOOL)errorIsRetryable:(NSError *)error {
+    if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) {
+        return NO;
+    }
+    return YES;
+}
+
+- (void)scheduleReconnect {
+    _reconnectToken++;
+    NSUInteger token = _reconnectToken;
+    NSURL *url = _targetURL;
+    NSLog(@"[Duplex] Scheduling reconnect to %@ in %.0fs (token=%lu)",
+          url.absoluteString, kReconnectIntervalSeconds, (unsigned long)token);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kReconnectIntervalSeconds * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (token != self->_reconnectToken) {
+            NSLog(@"[Duplex] Reconnect token %lu superseded — skipping", (unsigned long)token);
+            return;
+        }
+        NSLog(@"[Duplex] Reconnect firing for %@", url.absoluteString);
+        [self loadURL:url];
+    });
+}
+
+- (void)showStatusPageWithError:(NSError *)error {
+    if (!_webView) return;
+    SEL htmlSel = NSSelectorFromString(@"loadHTMLString:baseURL:");
+    if (![_webView respondsToSelector:htmlSel]) {
+        NSLog(@"[Duplex] ERROR: UIWebView does not respond to loadHTMLString:baseURL:");
+        return;
+    }
+
+    NSString *urlStr = [self htmlEscape:_targetURL.absoluteString ?: @"?"];
+    NSString *errStr = [self htmlEscape:[NSString stringWithFormat:@"%@ (code %ld in %@)",
+                                                                    error.localizedDescription ?: @"?",
+                                                                    (long)error.code,
+                                                                    error.domain ?: @"?"]];
+    NSInteger retrySec = (NSInteger)kReconnectIntervalSeconds;
+
+    NSString *html = [NSString stringWithFormat:
+        @"<!doctype html><html><head><meta charset=\"utf-8\">"
+         "<style>"
+         "html,body{margin:0;padding:0;background:#0b0d12;color:#e7e9ee;"
+         "font-family:-apple-system,Helvetica,Arial,sans-serif;height:100%%;}"
+         ".wrap{display:flex;flex-direction:column;justify-content:center;"
+         "align-items:flex-start;height:100%%;padding:0 120px;box-sizing:border-box;}"
+         ".badge{display:inline-block;background:#3a1f1f;color:#ff8a8a;"
+         "padding:8px 20px;border-radius:999px;font-size:24px;letter-spacing:2px;"
+         "text-transform:uppercase;margin-bottom:40px;}"
+         "h1{font-size:78px;margin:0 0 36px;font-weight:600;}"
+         ".url{font-size:42px;color:#7cc4ff;word-break:break-all;margin-bottom:36px;"
+         "font-family:Menlo,monospace;}"
+         ".err{font-size:32px;color:#ffb4b4;margin-bottom:60px;line-height:1.4;}"
+         ".cd{font-size:34px;color:#9aa3b2;}"
+         ".n{color:#fff;font-weight:600;font-variant-numeric:tabular-nums;}"
+         "</style></head><body><div class=\"wrap\">"
+         "<div class=\"badge\">Can't reach Duplex</div>"
+         "<h1>Waiting for the server…</h1>"
+         "<div class=\"url\">%@</div>"
+         "<div class=\"err\">%@</div>"
+         "<div class=\"cd\">Retrying in <span class=\"n\" id=\"n\">%ld</span> s</div>"
+         "</div><script>"
+         "var n=%ld;var t=setInterval(function(){n--;if(n<0){n=0;}"
+         "var el=document.getElementById('n');if(el)el.textContent=n;},1000);"
+         "</script></body></html>",
+        urlStr, errStr, (long)retrySec, (long)retrySec];
+
+    IMP imp = [_webView methodForSelector:htmlSel];
+    void (*func)(id, SEL, NSString *, NSURL *) = (void *)imp;
+    func(_webView, htmlSel, html, nil);
+    NSLog(@"[Duplex] Showing reconnect status page (target=%@)", _targetURL.absoluteString);
+}
+
+- (NSString *)htmlEscape:(NSString *)s {
+    if (!s) return @"";
+    NSMutableString *m = [s mutableCopy];
+    [m replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, m.length)];
+    [m replaceOccurrencesOfString:@"<" withString:@"&lt;"  options:0 range:NSMakeRange(0, m.length)];
+    [m replaceOccurrencesOfString:@">" withString:@"&gt;"  options:0 range:NSMakeRange(0, m.length)];
+    [m replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, m.length)];
+    return m;
 }
 
 - (NSString *)consoleHookJS {

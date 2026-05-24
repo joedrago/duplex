@@ -8,6 +8,28 @@
 const app = document.getElementById("app")
 const crumbs = document.getElementById("crumbs")
 
+// Diagnostic: probe localStorage durability across app relaunches.
+// Logs what we read on this launch, then stamps a fresh value so the next
+// launch can verify persistence. Safe to leave in; cheap and informative.
+;(function probeLocalStorage() {
+    try {
+        const key = "duplex.storageProbe"
+        const prev = localStorage.getItem(key)
+        const keys = localStorage.length
+        const now = new Date().toISOString()
+        if (prev) {
+            const elapsedMin = ((Date.now() - new Date(prev).getTime()) / 60000).toFixed(1)
+            console.log(`[storage] localStorage OK — ${keys} keys, last write ${prev} (${elapsedMin} min ago)`)
+        } else {
+            console.log(`[storage] localStorage empty (${keys} keys) — first probe write at ${now}`)
+        }
+        localStorage.setItem(key, now)
+        console.log(`[storage] wrote ${key}=${now}, now ${localStorage.length} keys`)
+    } catch (e) {
+        console.error(`[storage] localStorage threw: ${e.message || e}`)
+    }
+})()
+
 function encodePath(p) {
     return p.split("/").filter(Boolean).map(encodeURIComponent).join("/")
 }
@@ -65,6 +87,7 @@ function el(tag, props, ...children) {
 }
 
 async function renderBrowse(path) {
+    document.documentElement.classList.remove("player-active")
     renderCrumbs(path)
     app.replaceChildren(el("p", { className: "muted" }, "loading…"))
     let data
@@ -127,6 +150,115 @@ function teardownPlayer() {
         activeHls.destroy()
         activeHls = null
     }
+    if (window.duplexPlayer?.teardown) window.duplexPlayer.teardown()
+    window.duplexPlayer = null
+}
+
+// tvOS-style remote handler — only installed when IS_TV is set so the
+// browser experience stays mouse/click/spacebar driven. All keys are
+// consumed here (no spatial nav inside the player). Layout:
+//   • OK / Space / Enter → play/pause
+//   • Left / Right       → seek ±10s
+//   • Up                 → subtitle picker
+//   • Down               → audio picker (falls back to subs if single track)
+//   • Escape (= Menu)    → close picker if open, else back to browse
+function installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSelect }) {
+    const SEEK_SECONDS = 10
+    const showOSD = stage.__duplexShowOSD
+
+    const seek = (delta) => {
+        const dur = isFinite(video.duration) ? video.duration : Infinity
+        const before = video.currentTime
+        video.currentTime = Math.max(0, Math.min(dur, before + delta))
+        console.log(`[player] seek ${delta > 0 ? "+" : ""}${delta}s: ${before.toFixed(2)} -> ${video.currentTime.toFixed(2)}`)
+    }
+
+    const togglePlay = () => {
+        const wasPaused = video.paused
+        wasPaused ? video.play() : video.pause()
+        console.log(`[player] toggle play: paused ${wasPaused} -> ${!wasPaused} at t=${video.currentTime.toFixed(2)}`)
+    }
+
+    const pickerOptionsFromSelect = (sel) => Array.from(sel.options).map((o) => ({ value: o.value, label: o.textContent || o.value }))
+
+    const openSubsPicker = () => {
+        if (!subSelect) return
+        const options = pickerOptionsFromSelect(subSelect)
+        const current = Math.max(
+            0,
+            options.findIndex((o) => o.value === subSelect.value)
+        )
+        openPicker({
+            title: "Subtitles",
+            options,
+            currentIndex: current,
+            onSelect: (opt) => {
+                subSelect.value = opt.value
+                subSelect.dispatchEvent(new Event("change"))
+                console.log(`[player] subs set: ${opt.value || "off"}`)
+            }
+        })
+    }
+
+    const openAudioPicker = () => {
+        if (!audioSelect) {
+            // No multi-track audio menu — fall back to subs so Down still
+            // does something useful instead of being a dead key.
+            openSubsPicker()
+            return
+        }
+        const options = pickerOptionsFromSelect(audioSelect)
+        const current = Math.max(
+            0,
+            options.findIndex((o) => o.value === audioSelect.value)
+        )
+        openPicker({
+            title: "Audio",
+            options,
+            currentIndex: current,
+            onSelect: (opt) => {
+                audioSelect.value = opt.value
+                audioSelect.dispatchEvent(new Event("change"))
+                console.log(`[player] audio set: ${opt.value}`)
+            }
+        })
+    }
+
+    const handleKey = (ev) => {
+        const k = ev.key
+        if (k === " " || k === "Enter") {
+            ev.preventDefault()
+            togglePlay()
+            showOSD()
+            return true
+        }
+        if (k === "ArrowLeft" || k === "ArrowRight") {
+            ev.preventDefault()
+            seek(k === "ArrowLeft" ? -SEEK_SECONDS : SEEK_SECONDS)
+            showOSD()
+            return true
+        }
+        if (k === "ArrowUp") {
+            ev.preventDefault()
+            openSubsPicker()
+            return true
+        }
+        if (k === "ArrowDown") {
+            ev.preventDefault()
+            openAudioPicker()
+            return true
+        }
+        if (k === "Escape") {
+            ev.preventDefault()
+            console.log("[player] Escape -> back to browse")
+            if (history.length > 1) history.back()
+            else (location.hash = "#/browse/")
+            return true
+        }
+        return false
+    }
+
+    window.duplexPlayer = { handleKey, teardown: () => {} }
 }
 
 // Keeps the HLS pipeline alive in the face of transient muxer errors,
@@ -244,6 +376,7 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
 
 async function renderPlay(path) {
     teardownPlayer()
+    document.documentElement.classList.add("player-active")
     renderCrumbs(path)
     app.replaceChildren(el("p", null, "loading…"))
     let info
@@ -342,16 +475,31 @@ async function renderPlay(path) {
         return
     }
 
-    if (audioSelect && activeHls) {
+    if (audioSelect) {
         audioSelect.addEventListener("change", () => {
             const audioIdx = parseInt(audioSelect.value, 10)
+            if (audioIdx === currentAudio) {
+                console.log(`[audio] no-op: track ${audioIdx} already active`)
+                return
+            }
             const curTime = video.currentTime
             const wasPlaying = !video.paused
+            console.log(`[audio] switch: ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)} (wasPlaying=${wasPlaying}, native=${!activeHls})`)
             currentAudio = audioIdx
             if (activeRecovery) activeRecovery.notePosition(curTime)
-            activeHls.loadSource(masterUrlFor(audioIdx))
+            const newUrl = masterUrlFor(audioIdx)
+            if (activeHls) {
+                activeHls.loadSource(newUrl)
+            } else {
+                // Native HLS path (Safari, tvOS UIWebView) — no MSE, so we
+                // can't swap audio tracks via the Hls.js API; reload the
+                // master playlist with the new query param and seek back.
+                video.src = newUrl
+                video.load()
+            }
             video.addEventListener("canplay", function onCanPlay() {
                 video.removeEventListener("canplay", onCanPlay)
+                console.log(`[audio] canplay -> restore t=${curTime.toFixed(2)} play=${wasPlaying}`)
                 video.currentTime = curTime
                 if (wasPlaying) video.play()
             })
@@ -359,6 +507,13 @@ async function renderPlay(path) {
     }
 
     attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn })
+    // tvOS-style remote handling is opt-in via the `IS_TV` flag the native
+    // wrapper sets after page load. In a browser, leave window.duplexPlayer
+    // unset so the keydown handler falls through to ordinary spatial nav
+    // and the existing mouse/spacebar OSD behavior keeps working unchanged.
+    if (window.IS_TV) {
+        installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSelect })
+    }
 
     subSelect.addEventListener("change", () => {
         ;[...video.querySelectorAll("track")].forEach((t) => t.remove())
@@ -465,14 +620,28 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     document.addEventListener("keydown", onKey)
 
     let hideTimer = null
+    const isTv = !!window.IS_TV
+    // TV gets a longer dwell so the user can read what's selected; desktop
+    // stays snappy.
+    const HIDE_MS = isTv ? 4000 : 2500
     const showControls = () => {
         stage.classList.add("show-controls")
         if (hideTimer) {
             clearTimeout(hideTimer)
             hideTimer = null
         }
-        if (!video.paused) {
-            hideTimer = setTimeout(() => stage.classList.remove("show-controls"), 2500)
+        // On TV we always auto-hide. UIWebView reports video.paused
+        // unreliably (often stale `true` even while audio/video keep
+        // playing), so keying the hide on !video.paused would leave the OSD
+        // up forever. The user can re-surface controls with Up/Down.
+        // In a real browser, defer to the actual paused state so the OSD
+        // stays put while genuinely paused.
+        if (isTv || !video.paused) {
+            hideTimer = setTimeout(() => {
+                stage.classList.remove("show-controls")
+                const sel = document.querySelector(".selected")
+                if (sel) sel.classList.remove("selected")
+            }, HIDE_MS)
         }
     }
     stage.addEventListener("mousemove", showControls)
@@ -481,7 +650,13 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
         if (!video.paused) stage.classList.remove("show-controls")
     })
     video.addEventListener("pause", showControls)
-    showControls()
+    // On TV start with the OSD hidden so the user sees the video full-bleed.
+    // Any remote press surfaces it via installPlayerRemoteHandler.
+    if (!isTv) showControls()
+
+    // Expose hooks the player keydown handler needs.
+    stage.__duplexShowOSD = showControls
+    stage.__duplexIsOSDVisible = () => stage.classList.contains("show-controls")
 
     updatePlay()
     updateMute()
@@ -520,9 +695,238 @@ function detailsBlock(info) {
 
 function render() {
     const r = parseRoute()
+    // Always tear down any picker and the previous player before swapping
+    // routes — teardownPlayer also nulls window.duplexPlayer so leftover
+    // key handlers don't keep firing in the next view.
+    closeOpenPicker()
+    if (r.kind !== "play") teardownPlayer()
     if (r.kind === "play") renderPlay(r.path)
     else renderBrowse(r.path)
+    // Intentionally not auto-selecting anything — the spatial-nav highlight
+    // only appears once the user presses an arrow key.
 }
+
+// Spatial keyboard navigation for TV-style remotes (Siri Remote, etc.). The
+// tvOS wrapper synthesizes Arrow/Space/Enter KeyboardEvents on document.
+// We can't rely on DOM focus + `:focus` CSS — UIWebView's older WebKit on
+// tvOS does not reliably paint focus rings on anchors. Instead we manage
+// selection ourselves: tag the chosen element with `.selected`, style that
+// class loudly, and on Enter call .click(). Approach borrowed from
+// ~/work/movienight which hit the same wall.
+const SELECTABLE_SELECTOR = [
+    "a[href]",
+    "button:not([disabled])",
+    'input:not([disabled]):not([type="hidden"])',
+    "select:not([disabled])",
+    "textarea:not([disabled])",
+    "[data-selectable]",
+].join(",")
+
+function isVisible(el) {
+    if (!el.isConnected) return false
+    if (!el.offsetParent && getComputedStyle(el).position !== "fixed") return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+}
+
+function selectables() {
+    return Array.from(document.querySelectorAll(SELECTABLE_SELECTOR)).filter(isVisible)
+}
+
+function currentSelection() {
+    return document.querySelector(".selected")
+}
+
+function setSelection(el) {
+    const prev = currentSelection()
+    if (prev === el) return
+    if (prev) prev.classList.remove("selected")
+    if (el) {
+        el.classList.add("selected")
+        el.scrollIntoView({ block: "nearest", inline: "nearest" })
+    }
+}
+
+function pickNeighbor(dir) {
+    const all = selectables()
+    if (all.length === 0) return null
+    const cur = currentSelection()
+    if (!cur || !all.includes(cur)) return all[0]
+    const sr = cur.getBoundingClientRect()
+    const scx = sr.left + sr.width / 2
+    const scy = sr.top + sr.height / 2
+    let best = null
+    let bestScore = Infinity
+    for (const el of all) {
+        if (el === cur) continue
+        const r = el.getBoundingClientRect()
+        const cx = r.left + r.width / 2
+        const cy = r.top + r.height / 2
+        let primary, perpend
+        if (dir === "down") {
+            if (r.top < sr.bottom - 1) continue
+            primary = cy - scy
+            perpend = cx - scx
+        } else if (dir === "up") {
+            if (r.bottom > sr.top + 1) continue
+            primary = scy - cy
+            perpend = cx - scx
+        } else if (dir === "right") {
+            if (r.left < sr.right - 1) continue
+            primary = cx - scx
+            perpend = cy - scy
+        } else {
+            if (r.right > sr.left + 1) continue
+            primary = scx - cx
+            perpend = cy - scy
+        }
+        if (primary <= 0) continue
+        // Weight perpendicular distance heavily — prefer items in line with
+        // the current selection over closer-but-diagonal ones.
+        const score = primary * primary + 4 * perpend * perpend
+        if (score < bestScore) {
+            bestScore = score
+            best = el
+        }
+    }
+    return best
+}
+
+function moveSelection(dir) {
+    const n = pickNeighbor(dir)
+    if (!n) return false
+    setSelection(n)
+    return true
+}
+
+// Modal list picker for tvOS-style choice screens (subtitle / audio track).
+// Stays open until user picks an item or hits Escape. While open, swallows
+// all relevant keys so neither the player nor spatial-nav reacts.
+function openPicker({ title, options, currentIndex, onSelect, onCancel }) {
+    closeOpenPicker()
+    if (!options || options.length === 0) return null
+
+    const overlay = el("div", { className: "duplex-picker" })
+    const card = el("div", { className: "picker-card" })
+    overlay.append(card)
+    if (title) card.append(el("div", { className: "picker-title" }, title))
+    const list = el("div", { className: "picker-list" })
+    card.append(list)
+    document.body.append(overlay)
+
+    let idx = Math.max(0, Math.min(options.length - 1, currentIndex ?? 0))
+    const render = () => {
+        list.replaceChildren()
+        options.forEach((opt, i) => {
+            const item = el("div", { className: "picker-item" + (i === idx ? " selected" : "") }, opt.label)
+            item.addEventListener("click", () => {
+                idx = i
+                commit("select")
+            })
+            list.append(item)
+        })
+        const selEl = list.querySelector(".selected")
+        if (selEl) selEl.scrollIntoView({ block: "nearest" })
+    }
+
+    const commit = (action) => {
+        if (window.duplexPicker !== api) return
+        window.duplexPicker = null
+        overlay.remove()
+        if (action === "select") onSelect?.(options[idx], idx)
+        else onCancel?.()
+    }
+
+    const handleKey = (ev) => {
+        const k = ev.key
+        if (k === "ArrowUp") {
+            idx = (idx - 1 + options.length) % options.length
+            render()
+        } else if (k === "ArrowDown") {
+            idx = (idx + 1) % options.length
+            render()
+        } else if (k === "Enter" || k === " ") {
+            commit("select")
+        } else if (k === "Escape") {
+            commit("cancel")
+        } else {
+            return false
+        }
+        return true
+    }
+
+    const api = { handleKey, close: () => commit("cancel") }
+    window.duplexPicker = api
+    render()
+    console.log(`[picker] open "${title}" (${options.length} options, current=${idx})`)
+    return api
+}
+
+function closeOpenPicker() {
+    if (window.duplexPicker) window.duplexPicker.close()
+}
+
+const ARROW_DIRS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }
+
+function describeEl(el) {
+    if (!el) return "<none>"
+    const id = el.id ? "#" + el.id : ""
+    const cls = el.className && typeof el.className === "string" ? "." + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join(".") : ""
+    const txt = (el.textContent || "").trim().slice(0, 30)
+    return `<${el.tagName.toLowerCase()}${id}${cls} "${txt}">`
+}
+
+document.addEventListener(
+    "keydown",
+    (ev) => {
+        // Priority 1: a modal picker is open — it owns every relevant key
+        // until the user picks or cancels. stopImmediatePropagation keeps
+        // bubble-phase listeners (e.g. the legacy Space=play/pause hook in
+        // attachPlayerControls) from acting on the same event.
+        if (window.duplexPicker) {
+            if (window.duplexPicker.handleKey(ev)) {
+                ev.preventDefault()
+                ev.stopImmediatePropagation()
+            }
+            return
+        }
+        // Priority 2: TV-mode player owns its keys (play/pause, seek,
+        // sub/audio pickers, back). Same stop-propagation rationale.
+        if (window.duplexPlayer?.handleKey?.(ev)) {
+            ev.stopImmediatePropagation()
+            return
+        }
+        // Priority 3: spatial navigation in browse view (and the player in
+        // browser mode, where window.duplexPlayer is never installed).
+        if (ev.key === "Escape") {
+            ev.preventDefault()
+            if (history.length > 1) history.back()
+            else location.reload()
+            return
+        }
+        const dir = ARROW_DIRS[ev.key]
+        if (dir) {
+            const before = describeEl(currentSelection())
+            const moved = moveSelection(dir)
+            const after = describeEl(currentSelection())
+            console.log(`[nav] ${dir} moved=${moved} ${before} -> ${after} (selectables=${selectables().length})`)
+            if (moved) ev.preventDefault()
+            return
+        }
+        if (ev.key === "Enter" || ev.key === " ") {
+            const s = currentSelection()
+            if (!s) return
+            const clickable = s.tagName === "A" || s.tagName === "BUTTON"
+            if (ev.key === " " && !clickable) return
+            console.log(`[nav] ${ev.key === " " ? "Space" : "Enter"} clicking ${describeEl(s)}`)
+            if (typeof s.click === "function") {
+                ev.preventDefault()
+                s.click()
+            }
+        }
+    },
+    true
+)
 
 window.addEventListener("hashchange", render)
 window.addEventListener("DOMContentLoaded", () => {

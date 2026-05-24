@@ -87,11 +87,31 @@ main:has(.player) {
     border-radius: 8px;
     color: var(--fg);
     text-decoration: none;
-    transition: transform 0.05s ease;
+    transition:
+        transform 0.12s ease,
+        outline-color 0.12s ease;
 }
 .tile:hover {
     transform: translateY(-1px);
     outline: 1px solid var(--accent);
+}
+
+/* TV-style selection highlight. The tvOS UIWebView doesn't reliably paint
+ * native :focus rings on anchors, so the JS spatial-nav code applies a
+ * `.selected` class to the current target and we style that explicitly. */
+.selected {
+    outline: 4px solid #ffd24a !important;
+    outline-offset: 4px;
+    box-shadow: 0 0 0 8px rgba(255, 210, 74, 0.25);
+}
+.tile.selected {
+    background: #2a2f3a;
+    transform: scale(1.05);
+    position: relative;
+    z-index: 1;
+    transition:
+        transform 0.12s ease,
+        background 0.12s ease;
 }
 
 .tile .name {
@@ -180,6 +200,114 @@ main:has(.player) {
 .player-stage:hover .player-controls {
     opacity: 1;
     pointer-events: auto;
+}
+
+/* TV layout: hide controls the Siri Remote shouldn't be touching (volume,
+ * mute, fullscreen — all handled by the OS), bump the OSD up so it's
+ * readable from across the room, and hide the page header/breadcrumb chrome
+ * while a video is mounted so the picture goes full-bleed. */
+.tv-mode .ctrl-mute,
+.tv-mode .ctrl-volume,
+.tv-mode .ctrl-fs,
+.tv-mode .ctrl-subs,
+.tv-mode .ctrl-audio {
+    display: none !important;
+}
+.tv-mode .player {
+    height: 100vh;
+}
+.tv-mode.player-active header,
+.tv-mode.player-active main > .player > details {
+    display: none;
+}
+.tv-mode .player-controls {
+    padding: 1.2rem 2rem 1.6rem;
+    gap: 1.2rem;
+    font-size: 1.6rem;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.92), rgba(0, 0, 0, 0));
+}
+.tv-mode .ctrl-btn {
+    font-size: 2.4rem;
+    padding: 0.4rem 0.9rem;
+}
+.tv-mode .ctrl-time {
+    font-size: 1.4rem;
+    min-width: 14ch;
+}
+.tv-mode .ctrl-scrub {
+    height: 8px;
+}
+.tv-mode .ctrl-subs,
+.tv-mode .ctrl-audio {
+    font-size: 1.3rem;
+    padding: 0.4rem 0.7rem;
+    max-width: 24ch;
+}
+
+/* Modal picker for subtitle / audio choice on TV. Center card with a big
+ * scrollable list; works in both TV and browser (browser uses click). */
+.duplex-picker {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.picker-card {
+    background: #14181f;
+    border: 1px solid #2a313a;
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+    min-width: 360px;
+    max-width: min(560px, 80vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.picker-title {
+    padding: 1rem 1.25rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid #232831;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.picker-list {
+    overflow-y: auto;
+    padding: 0.5rem 0;
+}
+.picker-item {
+    padding: 0.75rem 1.25rem;
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 1rem;
+    border-left: 3px solid transparent;
+}
+.picker-item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+.picker-item.selected {
+    background: rgba(255, 210, 74, 0.12);
+    border-left-color: #ffd24a;
+    color: #fff;
+}
+/* TV variant: bigger everything so it reads at 10 ft. */
+.tv-mode .picker-card {
+    min-width: 520px;
+    max-width: 60vw;
+}
+.tv-mode .picker-title {
+    font-size: 1.6rem;
+    padding: 1.4rem 1.8rem;
+}
+.tv-mode .picker-item {
+    font-size: 1.5rem;
+    padding: 1rem 1.8rem;
+    border-left-width: 5px;
 }
 
 .ctrl-btn {
