@@ -188,6 +188,8 @@ main:has(.settings-page) {
     overflow-y: auto;
     flex: 1;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
     scrollbar-width: none;
     -ms-overflow-style: none;
     scroll-behavior: smooth;
@@ -199,6 +201,42 @@ main:has(.settings-page) {
     padding: 0.7rem 1rem;
     color: var(--muted);
     font-style: italic;
+}
+
+/* Empty-state card: a centered icon + headline + hint, sized to feel like
+ * the column knows it has nothing to show but isn't sad about it. The list
+ * container itself fills the column, so this just sits in the middle. */
+.col-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 2rem 1.25rem;
+    flex: 1;
+    gap: 0.5rem;
+    opacity: 0.85;
+    list-style: none;
+}
+.empty-state-icon {
+    font-size: 3.5rem;
+    line-height: 1;
+    opacity: 0.55;
+    margin-bottom: 0.4rem;
+    filter: grayscale(0.4);
+}
+.empty-state-title {
+    color: var(--muted);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+.empty-state-hint {
+    color: var(--muted);
+    opacity: 0.7;
+    font-size: 0.85rem;
+    max-width: 22ch;
+    line-height: 1.4;
 }
 
 /* A row in any column: icon + (context?) + name + meta + optional action. */
@@ -222,8 +260,14 @@ main:has(.settings-page) {
         background 0.12s ease,
         border-color 0.12s ease;
 }
-.row-link:hover {
-    background: rgba(255, 255, 255, 0.04);
+/* Hover and keyboard-selection share one visual: the row I'm pointing at
+ * (or that the remote has landed on) IS the row that would activate. No
+ * subtler "passive hover" state — couch-first UI only has one notion of
+ * "current target." */
+.row-link:hover,
+.row-link.selected {
+    background: var(--accent-soft);
+    border-left-color: var(--accent);
 }
 .row-icon {
     font-size: 1rem;
@@ -261,11 +305,9 @@ main:has(.settings-page) {
     font-variant-numeric: tabular-nums;
 }
 
-/* Selected (LRUD or click target): replace the default outline+glow with
- * something list-shaped — a left accent bar plus a tinted background. */
+/* The default .selected halo would clip oddly on a row; kill it here and
+ * let the rule above do the highlighting via tint + left bar. */
 .row-link.selected {
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
     outline: 0 !important;
     box-shadow: none !important;
 }
@@ -301,13 +343,13 @@ main:has(.settings-page) {
         background 0.12s ease,
         color 0.12s ease;
 }
-.row-action:hover {
+/* Destructive action: hover and selection both go red so the keyboard user
+ * sees the same "you're about to remove something" warning a mouse user
+ * does on hover. */
+.row-action:hover,
+.row-action.selected {
     background: rgba(255, 80, 80, 0.12);
     color: var(--bad);
-}
-.row-action.selected {
-    background: rgba(255, 210, 74, 0.18);
-    color: #ffd24a;
     outline: 0 !important;
     box-shadow: none !important;
 }

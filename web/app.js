@@ -228,8 +228,10 @@ function renderRoot(data) {
     columns.append(recentCol)
     fetchAndPopulateRecent(recentCol)
 
-    const continueCol = renderContinueColumn()
-    if (continueCol) columns.append(continueCol)
+    // Continue Watching is always rendered (even when empty) so deleting the
+    // last entry doesn't reflow the other two columns. The empty state
+    // doubles as discovery: new users learn what the column is for.
+    columns.append(renderContinueColumn())
 
     app.replaceChildren(columns)
 }
@@ -321,23 +323,36 @@ function makeBrowseRow(entry, vpath) {
 }
 
 // "Continue Watching" column: vertical list of rows, each with a small
-// inline "✕" remove button. Returns null when the resume map is empty so
-// the root view can omit the column entirely.
+// inline "✕" remove button. Always renders the column wrapper, even with
+// zero entries — an empty state replaces the list so deleting the last
+// item doesn't reflow the other root columns.
 function renderContinueColumn() {
     const items = continueItems()
-    if (items.length === 0) return null
-
     const list = el("ul", { className: "col-list" })
     const section = el("section", { className: "col col-continue" }, columnHeader("Continue Watching"), list)
 
+    if (items.length === 0) {
+        list.append(
+            el(
+                "li",
+                { className: "col-empty-state" },
+                el("div", { className: "empty-state-icon" }, "🍿"),
+                el("div", { className: "empty-state-title" }, "Nothing in progress"),
+                el("div", { className: "empty-state-hint" }, "Play something and pick up where you left off")
+            )
+        )
+        return section
+    }
+
     const rebuild = () => {
         const fresh = renderContinueColumn()
-        if (fresh) {
-            section.replaceWith(fresh)
-            const first = fresh.querySelector(".row-link")
-            if (first) setSelection(first)
+        section.replaceWith(fresh)
+        const firstItem = fresh.querySelector(".row-link")
+        if (firstItem) {
+            setSelection(firstItem)
         } else {
-            section.remove()
+            // Column is now empty; move focus over to the next column so
+            // the user isn't left without a target.
             const next = document.querySelector(".col-recent .row-link, .col-libraries .row-link")
             if (next) setSelection(next)
         }
@@ -1316,6 +1331,20 @@ function selectables() {
 function currentSelection() {
     return document.querySelector(".selected")
 }
+
+// One "current target" at a time. After hover and keyboard-selection were
+// merged to the same visual, any mouseover on a selectable element is
+// enough signal that the user has moved their focus away from whatever the
+// keyboard last picked — clear the stale `.selected` so the hover-painted
+// row is the only thing highlighted. Stays a no-op when the mouse hasn't
+// moved since the last render, since mouseover only fires on entry.
+document.addEventListener("mouseover", (ev) => {
+    if (!ev.target.closest?.(SELECTABLE_SELECTOR)) return
+    const sel = currentSelection()
+    if (sel && !sel.matches(":hover")) {
+        sel.classList.remove("selected")
+    }
+})
 
 function setSelection(el) {
     const prev = currentSelection()
