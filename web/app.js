@@ -162,7 +162,7 @@ function teardownPlayer() {
 //   • Up                 → subtitle picker
 //   • Down               → audio picker (falls back to subs if single track)
 //   • Escape (= Menu)    → close picker if open, else back to browse
-function installPlayerRemoteHandler({ video, stage, playBtn, subSelect, audioSelect }) {
+function installPlayerRemoteHandler({ video, stage, _playBtn, subSelect, audioSelect }) {
     const SEEK_SECONDS = 10
     const showOSD = stage.__duplexShowOSD
 
@@ -370,7 +370,9 @@ function installHlsRecovery({ hls, video, getMasterUrl }) {
             try {
                 hls.off(window.Hls.Events.ERROR, onError)
                 hls.off(window.Hls.Events.FRAG_LOADED, onFragLoaded)
-            } catch (_) {}
+            } catch (_) {
+                void _
+            }
         }
     }
 }
