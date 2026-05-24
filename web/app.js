@@ -1264,7 +1264,11 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
         }
         hideTimer = setTimeout(() => {
             stage.classList.remove("show-controls")
-            const sel = document.querySelector(".selected")
+            // Scope to `stage` — a global `document.querySelector` here
+            // would strip the restored browse selection if the user
+            // Escapes back before this orphan timer fires (teardownPlayer
+            // doesn't clear it).
+            const sel = stage.querySelector(".selected")
             if (sel) sel.classList.remove("selected")
         }, HIDE_MS)
     }
