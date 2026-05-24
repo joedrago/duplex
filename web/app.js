@@ -546,6 +546,7 @@ function prettySize(n) {
 
 let activeHls = null
 let activeRecovery = null
+let activeVideo = null
 
 function teardownPlayer() {
     if (activeRecovery) {
@@ -555,6 +556,21 @@ function teardownPlayer() {
     if (activeHls) {
         activeHls.destroy()
         activeHls = null
+    }
+    // Destroy the prior <video> aggressively. UIWebView's media pipeline on
+    // tvOS will keep decoding audio from a detached element if you only
+    // remove it from the DOM — pause + clear src + load() is what actually
+    // releases the underlying AVPlayer so the new playback doesn't start
+    // on top of the old one.
+    if (activeVideo) {
+        try {
+            activeVideo.pause()
+            activeVideo.removeAttribute("src")
+            activeVideo.load()
+        } catch (e) {
+            console.warn("[player] teardown video threw", e)
+        }
+        activeVideo = null
     }
     if (window.duplexPlayer?.teardown) window.duplexPlayer.teardown()
     window.duplexPlayer = null
@@ -587,10 +603,31 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
 
     const handleKey = (ev) => {
         const k = ev.key
-        // When the post-play "Continue" button is the active selection, let
-        // spatial nav fire its click on Enter/Space instead of swallowing
-        // the key for play/pause.
-        if (document.querySelector(".continue-next-btn.selected")) return false
+        // When the end-of-video "Continue" overlay is showing, it owns
+        // every relevant key. The button is the only meaningful target, so
+        // any LRUD press snaps selection back to it (defends against the
+        // OSD auto-hide clearing selection, or spatial nav drifting off to
+        // the back/play buttons with no neighbour to come back through).
+        const continueBtn = stage.querySelector(".continue-next-btn")
+        if (continueBtn) {
+            if (k === "ArrowUp" || k === "ArrowDown" || k === "ArrowLeft" || k === "ArrowRight") {
+                ev.preventDefault()
+                setSelection(continueBtn)
+                return true
+            }
+            if (k === "Enter" || k === " ") {
+                ev.preventDefault()
+                continueBtn.click()
+                return true
+            }
+            if (k === "Escape") {
+                ev.preventDefault()
+                if (history.length > 1) history.back()
+                else location.hash = "#/browse/"
+                return true
+            }
+            return false
+        }
         if (k === " " || k === "Enter") {
             ev.preventDefault()
             togglePlay()
@@ -875,6 +912,7 @@ async function renderPlay(path) {
     }
 
     const video = el("video", { playsInline: true, autoplay: true })
+    activeVideo = video
     const cueOverlay = el("div", { className: "cue-overlay" })
 
     // Subtitle options. Always include "Off" as the first entry so the
@@ -1079,6 +1117,11 @@ async function renderPlay(path) {
         if (subsRafId == null) subsRafId = requestAnimationFrame(renderSubs)
     }
 
+    // tvOS UIWebView's fetch will happily hang forever if the server-side
+    // sub extraction stalls — the user picks a track and nothing ever
+    // shows. Bound it with AbortController and surface failures on the
+    // button label so the picker reflects reality.
+    const SUBS_FETCH_TIMEOUT_MS = 30000
     const applySubChoice = async (value) => {
         cueGen++
         const gen = cueGen
@@ -1088,18 +1131,35 @@ async function renderPlay(path) {
         activeCues = []
         cueOverlay.textContent = ""
         if (!value) return
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), SUBS_FETCH_TIMEOUT_MS)
+        const url = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`
+        console.log(`[subs] fetching ${value} (${label})`)
         try {
-            const r = await fetch(`/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`)
+            const r = await fetch(url, { signal: ctrl.signal })
+            if (gen !== cueGen) return
             if (!r.ok) {
-                console.error(`[subs] fetch failed: ${r.status}`)
+                console.error(`[subs] fetch failed: ${r.status} ${r.statusText} for ${value}`)
+                subBtn.textContent = "CC ⚠ " + label
+                currentSubValue = ""
                 return
             }
             const text = await r.text()
             if (gen !== cueGen) return
             activeCues = parseVTT(text)
+            console.log(`[subs] loaded ${activeCues.length} cues for ${value}`)
+            if (activeCues.length === 0) {
+                subBtn.textContent = "CC ⚠ " + label + " (empty)"
+            }
             kickSubsLoop()
         } catch (e) {
-            console.error("[subs] fetch error", e)
+            if (gen !== cueGen) return
+            const aborted = e.name === "AbortError"
+            console.error(`[subs] ${aborted ? "timed out after " + SUBS_FETCH_TIMEOUT_MS + "ms" : "fetch error"} for ${value}:`, e)
+            subBtn.textContent = "CC ⚠ " + label + (aborted ? " (timeout)" : " (error)")
+            currentSubValue = ""
+        } finally {
+            clearTimeout(timer)
         }
     }
 
@@ -1143,8 +1203,13 @@ async function renderPlay(path) {
     }
 
     const openAudioPicker = () => {
+        // Up=subs, Down=audio is the contract everywhere. If there are no
+        // alternative audio tracks we deliberately do nothing here rather
+        // than fall through to the subs picker — the previous fallthrough
+        // meant Up and Down opened the same dialog on most files and felt
+        // inconsistent across the library.
         if (audioOptions.length === 0) {
-            openSubsPicker()
+            console.log("[player] Down ignored — only one audio track")
             return
         }
         const idx = Math.max(
@@ -1359,7 +1424,12 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
             // Escapes back before this orphan timer fires (teardownPlayer
             // doesn't clear it).
             const sel = stage.querySelector(".selected")
-            if (sel) sel.classList.remove("selected")
+            // Never clear the Continue-next button's selection: it's the
+            // only meaningful target while the end-of-video overlay is up,
+            // and if we drop it the user can press LRUD into the void.
+            if (sel && !sel.classList.contains("continue-next-btn")) {
+                sel.classList.remove("selected")
+            }
         }, HIDE_MS)
     }
     stage.addEventListener("mousemove", showControls)
