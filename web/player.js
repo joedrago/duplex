@@ -5,7 +5,15 @@
 // Public entry point: `startPlayer({ host, manifest, ...callbacks })`.
 // Returns a controller with play/pause/seek/dispose.
 
-import { Input, UrlSource, ALL_FORMATS, EncodedPacketSink } from "/vendor/mediabunny.mjs"
+import { Input, UrlSource, ALL_FORMATS, EncodedPacketSink, AudioSampleSink } from "/vendor/mediabunny.mjs"
+import { registerAc3Decoder } from "/vendor/mediabunny-ac3.mjs"
+
+// Register the AC-3 / E-AC-3 WASM fallback decoder with Mediabunny's custom-
+// decoder registry. Chrome's WebCodecs `AudioDecoder` doesn't ship Dolby
+// codecs in many builds; with this registration `AudioSampleSink` transparently
+// uses the WASM decoder for those codec strings while still using native
+// WebCodecs for AAC/Opus/etc. Idempotent — safe to call at every module load.
+registerAc3Decoder()
 
 // How many decoded video frames to keep queued ahead of the audio clock before
 // we pause feeding the decoder. Keeps memory bounded on long fast scrubs.
@@ -72,9 +80,10 @@ class PlayerController extends EventTarget {
         this.videoSink = null
         this.audioSink = null
 
-        // WebCodecs decoders
+        // WebCodecs video decoder (audio goes through Mediabunny's
+        // AudioSampleSink, which uses WebCodecs internally for supported
+        // codecs and the registered WASM decoder for AC-3 / E-AC-3).
         this.videoDecoder = null
-        this.audioDecoder = null
 
         // Audio playback
         this.audioCtx = null
@@ -252,28 +261,20 @@ class PlayerController extends EventTarget {
     }
 
     async _setupAudio() {
-        const cfg = await this.audioTrack.getDecoderConfig()
-        if (!cfg) {
-            // No audio is still playable — just skip.
-            console.warn("[player] no audio decoder config; muting audio")
+        // Mediabunny's AudioSampleSink decodes the track for us — internally
+        // it uses WebCodecs `AudioDecoder` for codecs it supports (AAC, Opus,
+        // FLAC, …) and the registered custom WASM decoder for AC-3 / E-AC-3.
+        // No separate `AudioDecoder.isConfigSupported` precheck because the
+        // sink reports failures via empty iteration; a single code path
+        // handles every audio codec.
+        try {
+            this.audioSink = new AudioSampleSink(this.audioTrack)
+            const codec = await this.audioTrack.getCodec()
+            console.log(`[player] audio sink: codec=${codec}`)
+        } catch (e) {
+            console.warn(`[player] audio sink setup failed: ${e.message}; muting audio`)
             this.audioTrack = null
-            return
         }
-        const { supported } = await AudioDecoder.isConfigSupported(cfg)
-        if (!supported) {
-            console.warn("[player] unsupported audio codec; muting", cfg.codec)
-            this.audioTrack = null
-            return
-        }
-
-        this.audioConfig = cfg
-        this.audioDecoder = new AudioDecoder({
-            output: (data) => this._onAudioFrame(data),
-            error: (e) => console.warn("[player] audio decoder error", e)
-        })
-        this.audioDecoder.configure(cfg)
-
-        this.audioSink = new EncodedPacketSink(this.audioTrack)
     }
 
     /**
@@ -316,13 +317,7 @@ class PlayerController extends EventTarget {
         }
         this.liveAudioSources.clear()
 
-        // Tear down the old audio decoder.
-        try {
-            this.audioDecoder?.close()
-        } catch (_) {
-            void _
-        }
-        this.audioDecoder = null
+        // Drop the old sink; the new one is created in _setupAudio.
         this.audioSink = null
 
         // Wire up the new track.
@@ -387,14 +382,10 @@ class PlayerController extends EventTarget {
                 console.warn("[player] videoDecoder reset/configure threw", e)
             }
         }
-        if (this.audioDecoder?.state === "configured") {
-            try {
-                this.audioDecoder.reset()
-                this.audioDecoder.configure(this.audioConfig)
-            } catch (e) {
-                console.warn("[player] audioDecoder reset/configure threw", e)
-            }
-        }
+        // Audio side: Mediabunny's AudioSampleSink is stateless across
+        // iterators — the pump-restart below spawns a fresh `samples()`
+        // iterator at the new start time, which handles seeking internally.
+        // Nothing to reset here.
 
         if (this.disposed || gen !== this.gen) return
 
@@ -466,48 +457,62 @@ class PlayerController extends EventTarget {
     }
 
     async _pumpAudio(startTime, gen, signal) {
-        // Audio doesn't have keyframes — every packet is independently
-        // decodable — but mediabunny's `getKeyPacket(t)` returns the nearest
-        // packet at-or-before t. If the file has a leading audio gap (some
-        // Matroska files start audio mid-movie), there is no packet at-or-
-        // before t=0 and we fall back to the first packet anywhere in the
-        // track. The output-side scheduler clamps any packet that lands in
-        // the past against ctx.currentTime, so a 10-second gap just means
-        // 10 seconds of silence before audio kicks in — video plays through.
-        let pkt = await this.audioSink.getKeyPacket(startTime)
-        if (!pkt) pkt = await this.audioSink.getFirstPacket()
-        if (!pkt) return
-        while (pkt && !signal.aborted && gen === this.gen) {
-            // Three backpressure gates, any one of them parks the pump:
-            //   (a) audio scheduled ahead of the clock — the natural "we've
-            //       buffered enough" signal.
-            //   (b) audioDecoder.decodeQueueSize — bounds in-flight decode()
-            //       calls so we can't outpace the decoder's output callback
-            //       and schedule thousands of AudioBufferSourceNodes in a
-            //       burst before the clock even ticks.
-            //   (c) liveAudioSources cap — hard ceiling on scheduled-but-not-
-            //       yet-played buffer sources. Without this, main-thread cost
-            //       of tracking 50k+ sources stalls the AudioContext clock.
-            while (!signal.aborted && gen === this.gen) {
-                const ahead = this.audioNextCtxTime - this.audioCtx.currentTime
-                const aheadFull = ahead > AUDIO_SCHEDULE_LOOKAHEAD_S
-                const inFull = this.audioDecoder.decodeQueueSize >= DECODER_QUEUE_CAP
-                const liveFull = this.liveAudioSources.size >= 100
-                if (!aheadFull && !inFull && !liveFull) break
-                await sleep(20)
-            }
-            if (signal.aborted || gen !== this.gen) break
-            try {
-                this.audioDecoder.decode(pkt.toEncodedAudioChunk())
-            } catch (e) {
-                console.warn("[player] audio decode threw", e)
-                break
-            }
-            pkt = await this.audioSink.getNextPacket(pkt)
+        // AudioSampleSink does the demux + decode in one step. We get
+        // already-decoded `AudioSample`s back; backpressure is *pull*-based —
+        // we just don't pull the next sample until we have room. No separate
+        // decoder-input queue to watch because the iterator owns it.
+        //
+        // Files with a leading audio gap (Matroska where audio starts mid-
+        // movie) iterate from the first sample regardless of `startTime`;
+        // the audio scheduler clamps any sample landing in the past, so a
+        // 10s gap just delays audio onset and video plays through.
+        let iter
+        try {
+            iter = this.audioSink.samples(startTime)
+        } catch (e) {
+            console.warn(`[player] audio sink samples() threw: ${e.message}`)
+            return
         }
-        if (!signal.aborted && gen === this.gen) {
+        let yielded = 0
+        try {
+            for await (const sample of iter) {
+                if (signal.aborted || gen !== this.gen) {
+                    sample.close()
+                    break
+                }
+                if (yielded === 0) {
+                    console.log(
+                        `[player] audio pump: first sample at t=${sample.timestamp.toFixed(3)}s ` +
+                            `(${sample.numberOfChannels}ch, ${sample.sampleRate}Hz, ${sample.numberOfFrames} frames)`
+                    )
+                }
+                yielded++
+                // Two backpressure gates, either parks the pump:
+                //   (a) scheduled audio ahead of the clock — buffered enough.
+                //   (b) liveAudioSources cap — main-thread cost of tracking
+                //       N pending AudioBufferSourceNodes stalls the clock
+                //       above ~hundreds of live sources.
+                while (!signal.aborted && gen === this.gen) {
+                    const ahead = this.audioNextCtxTime - this.audioCtx.currentTime
+                    const aheadFull = ahead > AUDIO_SCHEDULE_LOOKAHEAD_S
+                    const liveFull = this.liveAudioSources.size >= 100
+                    if (!aheadFull && !liveFull) break
+                    await sleep(20)
+                }
+                if (signal.aborted || gen !== this.gen) {
+                    sample.close()
+                    break
+                }
+                this._onAudioSample(sample)
+            }
+        } catch (e) {
+            if (!signal.aborted) console.warn(`[player] audio sample iter threw: ${e.message}`)
+        } finally {
+            // For-await-of cleans up on `break`, but if we exited via `return`
+            // or threw, explicitly close the iterator to free decoder
+            // resources (per Mediabunny's docs).
             try {
-                await this.audioDecoder.flush()
+                await iter.return?.()
             } catch (_) {
                 void _
             }
@@ -529,16 +534,16 @@ class PlayerController extends EventTarget {
         this.videoFrameQueue.push(frame)
     }
 
-    _onAudioFrame(data) {
+    _onAudioSample(sample) {
         if (this.disposed) {
-            data.close()
+            sample.close()
             return
         }
-        const tSec = data.timestamp / 1e6
-        // If this frame would land entirely in the past relative to our seek
+        const tSec = sample.timestamp
+        // If this sample would land entirely in the past relative to our seek
         // target, drop it.
-        if (tSec + data.numberOfFrames / data.sampleRate < this.audioBaseMediaTime) {
-            data.close()
+        if (tSec + sample.numberOfFrames / sample.sampleRate < this.audioBaseMediaTime) {
+            sample.close()
             return
         }
         // Downmix to stereo. Web Audio's automatic "speakers" downmix only
@@ -546,14 +551,14 @@ class PlayerController extends EventTarget {
         // copy that drops the center channel (where speech lives). We always
         // emit a 2-channel buffer to keep behavior consistent across layouts
         // and avoid implementation-specific quirks.
-        const inChs = data.numberOfChannels
-        const frames = data.numberOfFrames
-        const buf = this.audioCtx.createBuffer(2, frames, data.sampleRate)
+        const inChs = sample.numberOfChannels
+        const frames = sample.numberOfFrames
+        const buf = this.audioCtx.createBuffer(2, frames, sample.sampleRate)
         const L = new Float32Array(frames)
         const R = new Float32Array(frames)
         const planar = new Float32Array(frames)
         for (let inCh = 0; inCh < inChs; inCh++) {
-            data.copyTo(planar, { planeIndex: inCh, format: "f32-planar" })
+            sample.copyTo(planar, { planeIndex: inCh, format: "f32-planar" })
             const [lG, rG] = downmixGains(inChs, inCh)
             if (lG !== 0) {
                 for (let i = 0; i < frames; i++) L[i] += planar[i] * lG
@@ -564,7 +569,7 @@ class PlayerController extends EventTarget {
         }
         buf.copyToChannel(L, 0)
         buf.copyToChannel(R, 1)
-        data.close()
+        sample.close()
         const src = this.audioCtx.createBufferSource()
         src.buffer = buf
         src.connect(this.audioGain)
@@ -750,11 +755,6 @@ class PlayerController extends EventTarget {
         this.liveAudioSources.clear()
         try {
             this.videoDecoder?.close()
-        } catch (_) {
-            void _
-        }
-        try {
-            this.audioDecoder?.close()
         } catch (_) {
             void _
         }

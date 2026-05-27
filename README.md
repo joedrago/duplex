@@ -119,7 +119,7 @@ WantedBy=multi-user.target
   proprietary Dolby decoders. The audio button shows 🔇 and the picker
   labels offending tracks `— unsupported`. Future: in-browser WASM decode.
 - **HEVC** on Firefox, **AV1** on older Intel Macs: clean inline error.
-- **Embedded text subtitle tracks** (mov_text/subrip/ASS _inside_ the
+- **Embedded text subtitle tracks** (mov*text/subrip/ASS \_inside* the
   container) aren't yet readable — Mediabunny doesn't expose subtitle
   tracks. Sidecar subtitles work; embedded ones are hidden from the picker.
 - **Image-based subtitles** (PGS, VobSub, DVDSub) inventoried but not rendered.

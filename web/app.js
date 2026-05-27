@@ -793,13 +793,15 @@ async function renderPlay(path) {
     // Matroska TrackNumber), which doesn't agree with ffprobe's `index` —
     // but the iteration order does, so we lean on that.
     const audioTracks = info.audio_tracks ?? []
-    // Pre-flight each audio track through `AudioDecoder.isConfigSupported`
-    // so we can label undecodable tracks (e.g. AC-3 in Chrome builds without
-    // the proprietary Dolby decoders) and pick a *supported* track at boot
-    // rather than silently muting on the user-default track.
+    // Pre-flight each audio track for decode support. We have two paths:
+    //   1. WebCodecs native (AAC, Opus, FLAC, MP3, …)
+    //   2. Mediabunny custom-decoder registry (AC-3, E-AC-3 via vendored WASM)
+    // So a track is "supported" if either path accepts it.
+    const WASM_AUDIO_CODECS = new Set(["ac-3", "ec-3"])
     const audioSupport = await Promise.all(
         audioTracks.map(async (a) => {
             if (!a.codec_string || !a.sample_rate || !a.channels) return false
+            if (WASM_AUDIO_CODECS.has(a.codec_string)) return true
             try {
                 const { supported } = await AudioDecoder.isConfigSupported({
                     codec: a.codec_string,
