@@ -788,13 +788,19 @@ async function renderPlay(path) {
     // Audio options. Multi-track switching is implemented in a later phase;
     // for now the picker is shown when >1 track exists but only displays the
     // initial selection.
+    // Audio tracks are addressed by ORDINAL (0-based index into the
+    // audio_tracks array), not by the manifest's ffprobe `index` field.
+    // Mediabunny's `track.id` is the container-level track ID (MP4 tkhd /
+    // Matroska TrackNumber), which doesn't agree with ffprobe's `index` —
+    // but the iteration order does, so we lean on that.
     const audioTracks = info.audio_tracks ?? []
-    const initialAudioIdx = (() => {
-        const enTrack = audioTracks.find((a) => {
+    const initialAudioOrd = (() => {
+        const enOrd = audioTracks.findIndex((a) => {
             const lang = (a.language || "").toLowerCase()
             return lang === "en" || lang.startsWith("en-") || lang === "eng"
         })
-        return (enTrack || audioTracks[0])?.index
+        if (enOrd >= 0) return enOrd
+        return audioTracks.length > 0 ? 0 : -1
     })()
     const audioOptions =
         audioTracks.length > 1
@@ -802,7 +808,7 @@ async function renderPlay(path) {
                   const lang = a.language || `audio ${i + 1}`
                   const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
                   const ch = chInfo ? ` (${chInfo})` : ""
-                  return { value: String(a.index), label: `${lang}${ch}` }
+                  return { value: String(i), label: `${lang}${ch}` }
               })
             : []
 
@@ -846,7 +852,7 @@ async function renderPlay(path) {
             ? el(
                   "button",
                   { className: "ctrl-audio", type: "button", title: "Audio" },
-                  "♪ " + labelFor(audioOptions, String(initialAudioIdx))
+                  "♪ " + labelFor(audioOptions, String(initialAudioOrd))
               )
             : null
 
@@ -879,7 +885,7 @@ async function renderPlay(path) {
     const wrap = el("div", { className: "player" }, stage, detailsBlock(info))
     app.replaceChildren(wrap)
 
-    let currentAudio = initialAudioIdx
+    let currentAudio = initialAudioOrd
     let currentSubValue = ""
     void currentAudio
     void currentSubValue
@@ -899,6 +905,7 @@ async function renderPlay(path) {
             host,
             manifest: info,
             startAt,
+            startAudioOrd: initialAudioOrd >= 0 ? initialAudioOrd : null,
             onError: (msg) => {
                 app.replaceChildren(el("div", { className: "error" }, msg), detailsBlock(info))
             }
@@ -910,8 +917,11 @@ async function renderPlay(path) {
         host.addEventListener("click", () => {
             controller.paused ? controller.play() : controller.pause()
         })
-        // Kick playback now that everything is wired.
-        await controller.play()
+        // Kick playback. play() no longer awaits the resume — Chrome's
+        // autoplay policy can hang that promise indefinitely if no gesture
+        // has happened. Whether playback actually starts depends on
+        // audioCtx.state once the call returns; we check that just below.
+        controller.play()
     } catch (e) {
         console.error("[player] startup failed", e)
         app.replaceChildren(el("div", { className: "error" }, "player failed to start: " + e.message), detailsBlock(info))
@@ -919,6 +929,28 @@ async function renderPlay(path) {
     }
     const video = controller
     activeVideo = controller
+
+    // Tap-to-play overlay. Chrome (and Safari, sometimes) gate
+    // `AudioContext.resume()` behind a user gesture, so a deep link or a
+    // hard-refresh during playback lands in the player with audioCtx
+    // suspended. Without an overlay the page just shows a frozen first
+    // frame and a play button hidden behind the auto-hiding OSD — easy to
+    // miss. Show a big tap-target until the user interacts; remove on the
+    // first `play` event (whether the gesture came from this overlay, the
+    // ▶ button, spacebar, or the canvas click).
+    if (controller.paused) {
+        const tapOverlay = el(
+            "button",
+            { className: "tap-to-play", type: "button", "aria-label": "Play" },
+            el("span", { className: "tap-to-play-icon" }, "▶")
+        )
+        tapOverlay.addEventListener("click", (ev) => {
+            ev.stopPropagation()
+            controller.play()
+        })
+        stage.appendChild(tapOverlay)
+        controller.addEventListener("play", () => tapOverlay.remove(), { once: true })
+    }
 
     // Subtitle rendering. We deliberately avoid the native <track> element:
     // tvOS UIWebView's VTT pipeline crashes on cue boundaries, and even on
@@ -1028,14 +1060,25 @@ async function renderPlay(path) {
         }
     }
 
-    // Apply an audio choice. Phase 4 will implement track switching in the
-    // WebCodecs player; for now the picker shows the current selection but
-    // selecting a different track logs a warning and stays on the first.
-    const applyAudioChoice = (value) => {
+    // Apply an audio choice: the player swaps the audio decoder + sink +
+    // pump to the new track without disturbing video playback. Track ids
+    // are the source stream indices (ffprobe `index` == mediabunny track
+    // `.id`).
+    const applyAudioChoice = async (value) => {
         const audioIdx = parseInt(value, 10)
         if (audioIdx === currentAudio) return
-        console.warn(`[audio] multi-track switching is not yet implemented (requested ${audioIdx})`)
-        if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, String(currentAudio))
+        const prev = currentAudio
+        currentAudio = audioIdx
+        if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, value)
+        console.log(`[audio] switching ${prev} -> ${audioIdx}`)
+        try {
+            await controller.switchAudio(audioIdx)
+        } catch (e) {
+            console.warn("[audio] switch failed", e)
+            // Revert label so the picker reflects reality.
+            currentAudio = prev
+            if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, String(prev))
+        }
     }
 
     const openSubsPicker = () => {

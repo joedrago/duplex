@@ -22,18 +22,32 @@ const DECODER_QUEUE_CAP = 30
 // `requestAnimationFrame` cadence on the user's display is usually 60 Hz; the
 // presentation loop runs every rAF and only draws when a frame is due.
 
-export async function startPlayer({ host, manifest, startAt, onTimeUpdate, onDurationChange, onEnded, onError }) {
-    const ctl = new PlayerController({ host, manifest, startAt, onTimeUpdate, onDurationChange, onEnded, onError })
+export async function startPlayer({ host, manifest, startAt, startAudioOrd, onTimeUpdate, onDurationChange, onEnded, onError }) {
+    const ctl = new PlayerController({
+        host,
+        manifest,
+        startAt,
+        startAudioOrd,
+        onTimeUpdate,
+        onDurationChange,
+        onEnded,
+        onError
+    })
     await ctl.boot()
     return ctl
 }
 
 class PlayerController extends EventTarget {
-    constructor({ host, manifest, startAt, onTimeUpdate, onDurationChange, onEnded, onError }) {
+    constructor({ host, manifest, startAt, startAudioOrd, onTimeUpdate, onDurationChange, onEnded, onError }) {
         super()
         this.host = host
         this.manifest = manifest
         this.startAt = startAt || 0
+        // Which audio track to use at boot (0-based ordinal among audio
+        // tracks). `null`/undefined falls back to mediabunny's primary —
+        // whichever the file marks as default — which can disagree with
+        // the caller's "prefer English" preference.
+        this.startAudioOrd = startAudioOrd ?? null
         this.onTimeUpdate = onTimeUpdate || (() => {})
         this.onDurationChange = onDurationChange || (() => {})
         this.onEnded = onEnded || (() => {})
@@ -106,14 +120,19 @@ class PlayerController extends EventTarget {
         this.audioCtx = new AudioContext()
         this.audioGain = this.audioCtx.createGain()
         this.audioGain.connect(this.audioCtx.destination)
+        // Initial paused-ness mirrors the AudioContext state. The statechange
+        // handler below keeps `_paused` in sync from then on and emits the
+        // play/pause events the UI listens for.
+        this._paused = this.audioCtx.state !== "running"
         console.log(`[player] audioCtx state at boot: ${this.audioCtx.state}`)
         this.audioCtx.addEventListener("statechange", () => {
             console.log(`[player] audioCtx statechange -> ${this.audioCtx.state}`)
+            const wasPaused = this._paused
+            this._paused = this.audioCtx.state !== "running"
+            if (this._paused !== wasPaused) {
+                this.dispatchEvent(new Event(this._paused ? "pause" : "play"))
+            }
         })
-        // Don't force-suspend here. Chrome's autoplay policy already creates
-        // the context in "suspended" state if no user gesture has occurred,
-        // and Safari/Firefox often allow autoplay outright. Forcing suspend()
-        // here just adds a step we then have to resume around.
 
         // Open the source. UrlSource issues ranged fetches as Mediabunny needs
         // bytes; it's HTTP-driven, no preflight download.
@@ -132,7 +151,13 @@ class PlayerController extends EventTarget {
 
         // Build the canvas + audio graph based on what's actually in the file.
         this.videoTrack = await this.input.getPrimaryVideoTrack()
-        this.audioTrack = await this.input.getPrimaryAudioTrack()
+        if (this.startAudioOrd !== null) {
+            const tracks = await this.input.getTracks()
+            const audioTracks = tracks.filter((t) => t.isAudioTrack())
+            this.audioTrack = audioTracks[this.startAudioOrd] || audioTracks[0] || null
+        } else {
+            this.audioTrack = await this.input.getPrimaryAudioTrack()
+        }
 
         // Probe duration via mediabunny if the server-supplied manifest was
         // missing it.
@@ -249,6 +274,77 @@ class PlayerController extends EventTarget {
         this.audioDecoder.configure(cfg)
 
         this.audioSink = new EncodedPacketSink(this.audioTrack)
+    }
+
+    /**
+     * Swap to a different audio track without disturbing video playback.
+     * `ordinal` is the 0-based position among audio tracks (audio_tracks[N]
+     * in the manifest). We don't use mediabunny's `track.id` field for the
+     * match because that's the *container* track ID (tkhd ID in MP4, Matroska
+     * TrackNumber) which doesn't agree with ffprobe's stream `index` — the
+     * file order they both produce IS reliable, so we match on that.
+     * Video keeps decoding; only the audio decoder + sink + pump get torn
+     * down and rebuilt at the current play position.
+     */
+    async switchAudio(ordinal) {
+        if (this.disposed) return
+        const tracks = await this.input.getTracks()
+        const audioTracks = tracks.filter((t) => t.isAudioTrack())
+        const target = audioTracks[ordinal]
+        if (!target) {
+            console.warn(`[player] switchAudio: no audio track at ordinal=${ordinal} (have ${audioTracks.length})`)
+            return
+        }
+        if (target === this.audioTrack) return
+        console.log(`[player] switching audio to ordinal=${ordinal}`)
+
+        const resumeAt = this.currentTime
+        // Stop just the audio pump via its abort signal — gen stays put so
+        // the video pump keeps running. The video pump won't see any
+        // disruption; only the audio path gets rebuilt.
+        if (this.audioPumpAbort) this.audioPumpAbort()
+        await Promise.allSettled([this.audioPumpDone].filter(Boolean))
+        const gen = this.gen
+
+        // Stop in-flight scheduled audio (the old track's buffers).
+        for (const s of this.liveAudioSources) {
+            try {
+                s.stop()
+            } catch (_) {
+                void _
+            }
+        }
+        this.liveAudioSources.clear()
+
+        // Tear down the old audio decoder.
+        try {
+            this.audioDecoder?.close()
+        } catch (_) {
+            void _
+        }
+        this.audioDecoder = null
+        this.audioSink = null
+
+        // Wire up the new track.
+        this.audioTrack = target
+        await this._setupAudio()
+        if (this.disposed || gen !== this.gen) return
+        if (!this.audioTrack) {
+            console.warn("[player] switchAudio: new track not decodable")
+            return
+        }
+
+        // Rebase the clock so the new pump seeds correctly. Video pump is
+        // untouched and continues against the existing clock — we just shift
+        // the base so the new audio packets schedule at the right ctx time.
+        this.audioBaseMediaTime = resumeAt
+        this.audioBaseCtxTime = this.audioCtx.currentTime
+        this.audioNextCtxTime = this.audioBaseCtxTime
+
+        // Spawn fresh audio pump.
+        const { promise, abort } = makeAbortable((signal) => this._pumpAudio(resumeAt, gen, signal))
+        this.audioPumpDone = promise
+        this.audioPumpAbort = abort
     }
 
     // ---- pump lifecycle ----------------------------------------------------
@@ -370,13 +466,17 @@ class PlayerController extends EventTarget {
     }
 
     async _pumpAudio(startTime, gen, signal) {
-        let pkt = await this.audioSink.getKeyPacket(startTime)
-        if (!pkt) return
         // Audio doesn't have keyframes — every packet is independently
-        // decodable — but mediabunny's getKeyPacket on an audio sink returns
-        // the nearest preceding packet (== the first packet whose start <= t).
-        // We may still get a few frames whose start is < startTime; the audio
-        // scheduler skips ones that would land in the past.
+        // decodable — but mediabunny's `getKeyPacket(t)` returns the nearest
+        // packet at-or-before t. If the file has a leading audio gap (some
+        // Matroska files start audio mid-movie), there is no packet at-or-
+        // before t=0 and we fall back to the first packet anywhere in the
+        // track. The output-side scheduler clamps any packet that lands in
+        // the past against ctx.currentTime, so a 10-second gap just means
+        // 10 seconds of silence before audio kicks in — video plays through.
+        let pkt = await this.audioSink.getKeyPacket(startTime)
+        if (!pkt) pkt = await this.audioSink.getFirstPacket()
+        if (!pkt) return
         while (pkt && !signal.aborted && gen === this.gen) {
             // Three backpressure gates, any one of them parks the pump:
             //   (a) audio scheduled ahead of the clock — the natural "we've
@@ -519,33 +619,29 @@ class PlayerController extends EventTarget {
 
     // ---- HTMLMediaElement-shaped API ---------------------------------------
 
-    async play() {
+    play() {
         if (this.disposed) return
-        console.log(`[player] play() called; audioCtx.state=${this.audioCtx.state}`)
         this._ended = false
         if (this.audioCtx.state === "suspended") {
-            try {
-                await this.audioCtx.resume()
-                console.log(`[player] audioCtx.resume() ok; state=${this.audioCtx.state}`)
-            } catch (e) {
+            // CRITICAL: do NOT `await` audioCtx.resume(). Chrome's autoplay
+            // policy makes the returned promise *pending indefinitely* if no
+            // user gesture has happened — awaiting hangs the caller forever
+            // (and the tap-to-play overlay in renderPlay never gets added).
+            // Fire-and-forget; the statechange handler dispatches "play"
+            // once the state actually transitions.
+            this.audioCtx.resume().catch((e) => {
                 console.warn(`[player] audioCtx.resume rejected: ${e.message}`)
-            }
+            })
         }
-        if (this.audioCtx.state !== "running") {
-            console.log(`[player] not running after resume attempt (state=${this.audioCtx.state}); staying paused`)
-            this._paused = true
-            return
-        }
-        this._paused = false
-        this.dispatchEvent(new Event("play"))
     }
 
-    async pause() {
+    pause() {
         if (this.disposed) return
-        console.log(`[player] pause() called; audioCtx.state=${this.audioCtx.state}`)
-        if (this.audioCtx.state === "running") await this.audioCtx.suspend()
-        this._paused = true
-        this.dispatchEvent(new Event("pause"))
+        if (this.audioCtx.state === "running") {
+            this.audioCtx.suspend().catch((e) => {
+                console.warn(`[player] audioCtx.suspend rejected: ${e.message}`)
+            })
+        }
     }
 
     async seek(t) {
