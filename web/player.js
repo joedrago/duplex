@@ -5,7 +5,7 @@
 // Public entry point: `startPlayer({ host, manifest, ...callbacks })`.
 // Returns a controller with play/pause/seek/dispose.
 
-import { Input, UrlSource, ALL_FORMATS, EncodedPacketSink, AudioSampleSink } from "/vendor/mediabunny.mjs"
+import { Input, UrlSource, ALL_FORMATS, AudioSampleSink, VideoSampleSink } from "/vendor/mediabunny.mjs"
 import { registerAc3Decoder } from "/vendor/mediabunny-ac3.mjs"
 
 // Register the AC-3 / E-AC-3 WASM fallback decoder with Mediabunny's custom-
@@ -15,18 +15,16 @@ import { registerAc3Decoder } from "/vendor/mediabunny-ac3.mjs"
 // WebCodecs for AAC/Opus/etc. Idempotent — safe to call at every module load.
 registerAc3Decoder()
 
-// How many decoded video frames to keep queued ahead of the audio clock before
-// we pause feeding the decoder. Keeps memory bounded on long fast scrubs.
+// How many decoded video samples to keep queued ahead of the audio clock
+// before we pause pulling more from the sink. Keeps VRAM bounded on long
+// scrubs. Both pumps are pull-based now (Mediabunny's *SampleSink async
+// iterators), so we throttle by *not* calling `.next()` rather than by
+// watching a decoder's internal queue.
 const VIDEO_FRAME_QUEUE_TARGET = 24
 // How far ahead (seconds) of `audioCtx.currentTime` we'll pre-schedule audio
 // buffer sources. Larger = more resilient to main-thread jank but more pending
 // state to tear down on seek.
 const AUDIO_SCHEDULE_LOOKAHEAD_S = 0.5
-// `decoder.decodeQueueSize` cap — the *real* input-side backpressure signal.
-// `decode()` is synchronous so we can hammer the decoder with chunks faster
-// than it produces output frames; the only way to slow ourselves down before
-// the decoder has caught up is to watch its own pending-input counter.
-const DECODER_QUEUE_CAP = 30
 // `requestAnimationFrame` cadence on the user's display is usually 60 Hz; the
 // presentation loop runs every rAF and only draws when a frame is due.
 
@@ -80,10 +78,10 @@ class PlayerController extends EventTarget {
         this.videoSink = null
         this.audioSink = null
 
-        // WebCodecs video decoder (audio goes through Mediabunny's
-        // AudioSampleSink, which uses WebCodecs internally for supported
-        // codecs and the registered WASM decoder for AC-3 / E-AC-3).
-        this.videoDecoder = null
+        // Both audio and video go through Mediabunny's *SampleSink. The sink
+        // uses WebCodecs internally for codecs the browser supports and the
+        // registered WASM decoder for AC-3 / E-AC-3 (audio). No raw
+        // VideoDecoder / AudioDecoder lifecycle to manage on our side.
 
         // Audio playback
         this.audioCtx = null
@@ -218,22 +216,22 @@ class PlayerController extends EventTarget {
     }
 
     async _setupVideo() {
+        // Mediabunny's VideoSampleSink owns the decoder lifecycle and picks
+        // the right random-access points internally — important for HEVC,
+        // where the container can mark CRA frames as keyframes (correct per
+        // HEVC spec) but WebCodecs only accepts true IDR. We were hitting
+        // "An EncodedVideoChunk was marked as type `key` but wasn't a key
+        // frame" on a Donnie Darko encode; the sink handles that for us.
+        const codec = await this.videoTrack.getCodec()
         const cfg = await this.videoTrack.getDecoderConfig()
-        if (!cfg) {
-            this.onError(`unknown video codec: ${await this.videoTrack.getCodec()}`)
-            return
+        if (cfg) {
+            const { supported } = await VideoDecoder.isConfigSupported(cfg)
+            if (!supported) {
+                this.onError(`this browser can't decode ${codec} (${cfg.codec}). try Safari or Chrome.`)
+                return
+            }
         }
-        console.log(
-            `[player] video config: codec=${cfg.codec} ` +
-                `coded=${cfg.codedWidth}x${cfg.codedHeight} ` +
-                `description=${cfg.description ? `${cfg.description.byteLength}B` : "none"}`
-        )
-        const { supported } = await VideoDecoder.isConfigSupported(cfg)
-        if (!supported) {
-            const codec = await this.videoTrack.getCodec()
-            this.onError(`this browser can't decode ${codec} (${cfg.codec}). try Safari or Chrome.`)
-            return
-        }
+        console.log(`[player] video: codec=${codec}`)
 
         const w = await this.videoTrack.getDisplayWidth()
         const h = await this.videoTrack.getDisplayHeight()
@@ -244,20 +242,7 @@ class PlayerController extends EventTarget {
         this.canvasCtx = this.canvas.getContext("2d")
         this.host.appendChild(this.canvas)
 
-        // Save a copy of the config so reconfigure-on-decoder-reset works.
-        this.videoConfig = cfg
-        this.videoDecoder = new VideoDecoder({
-            output: (frame) => this._onVideoFrame(frame),
-            error: (e) => {
-                console.warn(
-                    `[player] video decoder error name=${e.name} message=${e.message} ` + `state=${this.videoDecoder?.state}`
-                )
-                this.onError(`video decoder error: ${e.message || e.name}`)
-            }
-        })
-        this.videoDecoder.configure(cfg)
-
-        this.videoSink = new EncodedPacketSink(this.videoTrack)
+        this.videoSink = new VideoSampleSink(this.videoTrack)
     }
 
     async _setupAudio() {
@@ -367,25 +352,9 @@ class PlayerController extends EventTarget {
         }
         this.liveAudioSources.clear()
 
-        // Discard pending decoder work without emitting output. We do NOT
-        // use flush() here: flush() processes pending input and emits any
-        // remaining decoded frames, which on a backward seek would prepend
-        // future-timestamp frames to an otherwise-cleared queue, blocking
-        // the present loop (which only dequeues frames whose timestamp <=
-        // mediaTime). reset() throws those packets away and demotes the
-        // decoder to "unconfigured" — we configure() it again right after.
-        if (this.videoDecoder?.state === "configured") {
-            try {
-                this.videoDecoder.reset()
-                this.videoDecoder.configure(this.videoConfig)
-            } catch (e) {
-                console.warn("[player] videoDecoder reset/configure threw", e)
-            }
-        }
-        // Audio side: Mediabunny's AudioSampleSink is stateless across
-        // iterators — the pump-restart below spawns a fresh `samples()`
-        // iterator at the new start time, which handles seeking internally.
-        // Nothing to reset here.
+        // Both pumps just need a fresh `samples()` iterator from their sinks
+        // at the new start time. Mediabunny tears down + reconfigures the
+        // underlying decoder internally for us — no reset/configure dance.
 
         if (this.disposed || gen !== this.gen) return
 
@@ -411,45 +380,47 @@ class PlayerController extends EventTarget {
     }
 
     async _pumpVideo(startTime, gen, signal) {
-        let pkt = await this.videoSink.getKeyPacket(startTime)
-        if (!pkt) {
-            console.warn(`[player] no key packet at/before t=${startTime.toFixed(2)}s`)
+        // VideoSampleSink owns the decoder and resolves random-access
+        // ambiguities internally. We pull decoded VideoSamples and stash
+        // them in `videoFrameQueue`; backpressure = stop pulling.
+        let iter
+        try {
+            iter = this.videoSink.samples(startTime)
+        } catch (e) {
+            console.warn(`[player] video sink samples() threw: ${e.message}`)
             return
         }
-        console.log(
-            `[player] video pump: starting at t=${startTime.toFixed(2)}s ` +
-                `(first key packet t=${pkt.timestamp.toFixed(3)}s, ` +
-                `type=${pkt.type}, ${pkt.byteLength}B)`
-        )
-        // The clearing of stale frames is handled in _onVideoFrame: anything
-        // whose timestamp is below startTime gets dropped silently.
         this._discardFramesBefore = startTime
-        while (pkt && !signal.aborted && gen === this.gen) {
-            // Two backpressure gates, both must clear:
-            //   (a) videoFrameQueue length — bounds memory after decode.
-            //   (b) videoDecoder.decodeQueueSize — bounds in-flight decode()
-            //       calls. `decode()` is synchronous so without (b) we'd hand
-            //       the decoder thousands of chunks before it produced a single
-            //       frame, defeating (a).
-            while (!signal.aborted && gen === this.gen) {
-                const outFull = this.videoFrameQueue.length >= VIDEO_FRAME_QUEUE_TARGET
-                const inFull = this.videoDecoder.decodeQueueSize >= DECODER_QUEUE_CAP
-                if (!outFull && !inFull) break
-                await sleep(16)
+        let yielded = 0
+        try {
+            for await (const sample of iter) {
+                if (signal.aborted || gen !== this.gen) {
+                    sample.close()
+                    break
+                }
+                if (yielded === 0) {
+                    console.log(
+                        `[player] video pump: first sample at t=${sample.timestamp.toFixed(3)}s ` +
+                            `(${sample.codedWidth}x${sample.codedHeight}, rotation=${sample.rotation})`
+                    )
+                }
+                yielded++
+                // Backpressure: bounds VRAM. The sink advances internally
+                // only when we call .next(), so not pulling parks it.
+                while (!signal.aborted && gen === this.gen && this.videoFrameQueue.length >= VIDEO_FRAME_QUEUE_TARGET) {
+                    await sleep(16)
+                }
+                if (signal.aborted || gen !== this.gen) {
+                    sample.close()
+                    break
+                }
+                this._onVideoSample(sample)
             }
-            if (signal.aborted || gen !== this.gen) break
+        } catch (e) {
+            if (!signal.aborted) console.warn(`[player] video sample iter threw: ${e.message}`)
+        } finally {
             try {
-                this.videoDecoder.decode(pkt.toEncodedVideoChunk())
-            } catch (e) {
-                console.warn(`[player] video decode threw at t=${pkt.timestamp.toFixed(3)}s`, e)
-                break
-            }
-            pkt = await this.videoSink.getNextPacket(pkt)
-        }
-        if (!signal.aborted && gen === this.gen) {
-            // End of stream — flush the decoder so the last frames come out.
-            try {
-                await this.videoDecoder.flush()
+                await iter.return?.()
             } catch (_) {
                 void _
             }
@@ -521,17 +492,16 @@ class PlayerController extends EventTarget {
 
     // ---- WebCodecs output callbacks ----------------------------------------
 
-    _onVideoFrame(frame) {
+    _onVideoSample(sample) {
         if (this.disposed) {
-            frame.close()
+            sample.close()
             return
         }
-        const tSec = frame.timestamp / 1e6
-        if (tSec + 0.001 < this._discardFramesBefore) {
-            frame.close()
+        if (sample.timestamp + 0.001 < this._discardFramesBefore) {
+            sample.close()
             return
         }
-        this.videoFrameQueue.push(frame)
+        this.videoFrameQueue.push(sample)
     }
 
     _onAudioSample(sample) {
@@ -595,13 +565,13 @@ class PlayerController extends EventTarget {
         if (this.disposed) return
         const mediaTime = this.currentTime
 
-        // Find the latest frame whose timestamp is <= mediaTime; drop earlier
-        // frames; keep later ones for the next tick.
+        // Find the latest sample whose timestamp is <= mediaTime; drop earlier
+        // samples; keep later ones for the next tick. VideoSample timestamps
+        // are floating-point seconds (no /1e6 unit conversion needed).
         let drew = null
         while (this.videoFrameQueue.length > 0) {
-            const f = this.videoFrameQueue[0]
-            const ft = f.timestamp / 1e6
-            if (ft <= mediaTime + 0.001) {
+            const s = this.videoFrameQueue[0]
+            if (s.timestamp <= mediaTime + 0.001) {
                 if (drew) drew.close()
                 drew = this.videoFrameQueue.shift()
             } else {
@@ -609,7 +579,10 @@ class PlayerController extends EventTarget {
             }
         }
         if (drew && this.canvasCtx) {
-            this.canvasCtx.drawImage(drew, 0, 0, this.canvas.width, this.canvas.height)
+            // `sample.draw()` honors VideoSample rotation metadata; equivalent
+            // to ctx.drawImage on the underlying CanvasImageSource but
+            // rotation-aware for sideways/upside-down phone captures.
+            drew.draw(this.canvasCtx, 0, 0, this.canvas.width, this.canvas.height)
             drew.close()
         }
 
@@ -753,11 +726,6 @@ class PlayerController extends EventTarget {
             }
         }
         this.liveAudioSources.clear()
-        try {
-            this.videoDecoder?.close()
-        } catch (_) {
-            void _
-        }
         try {
             await this.audioCtx.close()
         } catch (_) {
