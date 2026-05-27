@@ -54,4 +54,12 @@ pub struct Cli {
     /// web client from a different port.
     #[arg(long, default_value_t = false)]
     pub dev_cors: bool,
+
+    /// Mirror browser JS console output (console.log/warn/error, uncaught
+    /// errors, unhandled promise rejections) into this process's stdout via
+    /// the tracing facility, for unified server+client debugging. Adds
+    /// `POST /_debug/log` and inlines `window.__DUPLEX_CONFIG__` into the
+    /// served HTML so the client knows to install the shim.
+    #[arg(long, default_value_t = false)]
+    pub js_logs: bool,
 }

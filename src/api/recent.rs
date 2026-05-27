@@ -96,7 +96,11 @@ pub async fn recent(
             }
         }
     }
-    items.sort_by(|a, b| b.mtime().cmp(&a.mtime()).then_with(|| a.name().cmp(b.name())));
+    items.sort_by(|a, b| {
+        b.mtime()
+            .cmp(&a.mtime())
+            .then_with(|| a.name().cmp(b.name()))
+    });
     items.truncate(limit);
 
     Json(RecentResponse { items })

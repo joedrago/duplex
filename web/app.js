@@ -10,6 +10,19 @@ const app = document.getElementById("app")
 const crumbs = document.getElementById("crumbs")
 const headerActions = document.getElementById("header-actions")
 
+// Smoke test for the --js-logs pipeline. Gated behind ?smoketest=1 so default
+// boots stay quiet; visit /?smoketest=1 to re-prove the full chain end-to-end.
+if (window.__DUPLEX_CONFIG__?.jsLogs && new URLSearchParams(location.search).get("smoketest") === "1") {
+    console.log("[smoke] console.log from app boot")
+    console.info("[smoke] console.info from app boot")
+    console.warn("[smoke] console.warn from app boot")
+    console.error("[smoke] console.error with Error", new Error("smoke error"))
+    setTimeout(() => {
+        throw new Error("[smoke] setTimeout throw")
+    }, 0)
+    Promise.reject(new Error("[smoke] unhandled rejection"))
+}
+
 // Sort mode for the browse grid. Persisted in localStorage so the user gets
 // the same order on next launch. Continue Watching and the root Recently
 // Added section have their own intrinsic order; this only governs the main
@@ -440,9 +453,7 @@ async function fetchAndPopulateRecent(col) {
         const parent = parts.join(" / ")
         const isDir = it.kind === "dir"
         const href = (isDir ? "#/browse/" : "#/play/") + encodePath(it.vpath)
-        const metaLeft = isDir
-            ? `${it.children} ${it.children === 1 ? "entry" : "entries"}`
-            : prettySize(it.size)
+        const metaLeft = isDir ? `${it.children} ${it.children === 1 ? "entry" : "entries"}` : prettySize(it.size)
         const link = el(
             "a",
             { className: "row-link " + (isDir ? "row-dir" : "row-file"), href },
@@ -1084,7 +1095,11 @@ async function renderPlay(path) {
                 if (m) {
                     // Strip VTT inline markup (<i>, <v Speaker>, <00:00:01.000>
                     // timestamps, …) — we render as plain text via textContent.
-                    const body = lines.slice(i + 1).join("\n").replace(/<\/?[^>]+>/g, "").trim()
+                    const body = lines
+                        .slice(i + 1)
+                        .join("\n")
+                        .replace(/<\/?[^>]+>/g, "")
+                        .trim()
                     if (body) cues.push({ start: parseTime(m[1]), end: parseTime(m[2]), text: body })
                     break
                 }
@@ -1155,7 +1170,10 @@ async function renderPlay(path) {
         } catch (e) {
             if (gen !== cueGen) return
             const aborted = e.name === "AbortError"
-            console.error(`[subs] ${aborted ? "timed out after " + SUBS_FETCH_TIMEOUT_MS + "ms" : "fetch error"} for ${value}:`, e)
+            console.error(
+                `[subs] ${aborted ? "timed out after " + SUBS_FETCH_TIMEOUT_MS + "ms" : "fetch error"} for ${value}:`,
+                e
+            )
             subBtn.textContent = "CC ⚠ " + label + (aborted ? " (timeout)" : " (error)")
             currentSubValue = ""
         } finally {

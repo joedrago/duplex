@@ -1,18 +1,18 @@
 {
-  "images" : [
-    {
-      "filename" : "front.png",
-      "idiom" : "tv",
-      "scale" : "1x"
-    },
-    {
-      "filename" : "front_2x.png",
-      "idiom" : "tv",
-      "scale" : "2x"
+    "images": [
+        {
+            "filename": "front.png",
+            "idiom": "tv",
+            "scale": "1x"
+        },
+        {
+            "filename": "front_2x.png",
+            "idiom": "tv",
+            "scale": "2x"
+        }
+    ],
+    "info": {
+        "author": "xcode",
+        "version": 1
     }
-  ],
-  "info" : {
-    "author" : "xcode",
-    "version" : 1
-  }
 }

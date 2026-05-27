@@ -11,6 +11,7 @@ use crate::probe::ProbeCache;
 use crate::stream::StreamCache;
 
 pub mod browse;
+pub mod debug;
 pub mod file;
 pub mod hls;
 pub mod next;
@@ -45,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         .merge(subs::routes())
         .merge(recent::routes())
         .merge(next::routes())
+        .merge(debug::routes())
         .merge(web::routes())
         .with_state(state)
         .layer(cors)
