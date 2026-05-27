@@ -8,21 +8,16 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::Cli;
 use crate::library::Library;
-use crate::probe::keyframes::KeyframeCache;
 use crate::probe::ProbeCache;
-use crate::stream::StreamCache;
 
 pub mod browse;
 pub mod codec_string;
 pub mod debug;
-pub mod file;
-pub mod hls;
 pub mod manifest;
 pub mod next;
 pub mod raw;
 pub mod recent;
 pub mod sidecar;
-pub mod subs;
 pub mod vpath;
 pub mod web;
 
@@ -31,8 +26,6 @@ pub mod web;
 pub struct AppState {
     pub library: Library,
     pub probe: Arc<ProbeCache>,
-    pub keyframes: Arc<KeyframeCache>,
-    pub streams: Arc<StreamCache>,
     pub cfg: Arc<Cli>,
 }
 
@@ -51,12 +44,9 @@ pub fn router(state: AppState) -> Router {
     // default.
     Router::new()
         .merge(browse::routes())
-        .merge(file::routes())
         .merge(manifest::routes())
         .merge(raw::routes())
         .merge(sidecar::routes())
-        .merge(hls::routes())
-        .merge(subs::routes())
         .merge(recent::routes())
         .merge(next::routes())
         .merge(debug::routes())

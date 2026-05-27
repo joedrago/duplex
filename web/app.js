@@ -334,7 +334,7 @@ function makeBrowseRow(entry, vpath) {
     const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
     const name = el("div", { className: "row-name" }, isDir ? entry.name : displayName(entry.name))
-    if (!isDir && entry.decision) name.append(el("span", { className: "badge " + entry.decision }, entry.decision))
+    if (!isDir && entry.codec_hint) name.append(el("span", { className: "badge " + entry.codec_hint }, entry.codec_hint))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
         : [prettySize(entry.size), entry.ext].filter(Boolean)

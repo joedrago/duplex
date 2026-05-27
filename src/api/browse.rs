@@ -7,7 +7,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{vpath, AppState};
-use crate::capability;
 use crate::library::Node;
 
 fn epoch_seconds(t: SystemTime) -> i64 {
@@ -49,7 +48,6 @@ pub enum Entry {
         ext: Option<String>,
         size: u64,
         mtime: i64,
-        decision: Option<String>,
         codec_hint: Option<String>,
     },
 }
@@ -88,7 +86,6 @@ pub async fn browse(
         }
     };
 
-    let caps = capability::default_caps();
     let mut entries = Vec::with_capacity(dir.children.len());
 
     // At the virtual root, emit library roots in CLI order (the order the user
@@ -118,16 +115,11 @@ pub async fn browse(
                     .probe
                     .cached(&f.abs_path, f.size, f.mtime)
                     .and_then(|p| p.video_codec().map(str::to_string));
-                let decision = state
-                    .probe
-                    .cached(&f.abs_path, f.size, f.mtime)
-                    .map(|p| capability::decide(&p, &caps).label());
                 entries.push(Entry::File {
                     name: name.clone(),
                     ext: f.ext.clone(),
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
-                    decision,
                     codec_hint,
                 });
             }

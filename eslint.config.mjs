@@ -4,7 +4,7 @@ import globals from "globals"
 export default [
     js.configs.recommended,
     {
-        ignores: ["web/vendor/**", "target/**", "node_modules/**"]
+        ignores: ["web/vendor/**", "deleteme/**", "target/**", "node_modules/**"]
     },
     {
         files: ["**/*.{js,mjs,cjs}"],

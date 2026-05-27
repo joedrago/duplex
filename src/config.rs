@@ -28,15 +28,6 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", default_value = "info", env = "DUPLEX_LOG")]
     pub log: String,
 
-    /// Path to the ffmpeg binary.
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "ffmpeg",
-        env = "DUPLEX_FFMPEG"
-    )]
-    pub ffmpeg: PathBuf,
-
     /// Path to the ffprobe binary.
     #[arg(
         long,

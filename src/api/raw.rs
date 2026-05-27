@@ -1,5 +1,6 @@
-//! Range-aware passthrough of original file bytes. Used only when the capability
-//! decision is DirectPlay.
+//! Range-aware passthrough of original file bytes. The only playback
+//! endpoint in the slim server — the client-side WebCodecs player demuxes
+//! everything it fetches here.
 
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
