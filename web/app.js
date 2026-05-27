@@ -1135,25 +1135,10 @@ async function maybeShowContinueNext({ stage, path }) {
 
 function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path }) {
     let scrubbing = false
-    let resumed = false
-    // Restore prior position on first loadedmetadata. We only do this once per
-    // mount — later metadata events (audio-track swaps reload the source and
-    // we seek back manually in that flow) shouldn't re-trigger restore.
-    const tryResume = () => {
-        if (resumed || !path) return
-        const entry = getResume(path)
-        if (!entry) {
-            resumed = true
-            return
-        }
-        if (entry.pos > 0 && isFinite(video.duration) && entry.pos < video.duration) {
-            console.log(`[resume] restoring "${path}" to ${entry.pos.toFixed(1)}s`)
-            video.currentTime = entry.pos
-        }
-        resumed = true
-    }
-    video.addEventListener("loadedmetadata", tryResume)
-    if (video.readyState >= 1) tryResume()
+    // Resume-position restore happens in startPlayer({ startAt }) — the
+    // WebCodecs player needs the start time at boot, not as a post-load seek,
+    // so the pumps + decoder seed once at the right keyframe instead of
+    // racing a near-immediate second seek.
 
     // Heartbeat: persist every HEARTBEAT_MS while playing, plus on pause and
     // on any scrub committal. setResume() handles the "first 5s / last 5%"
@@ -1192,12 +1177,17 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     video.addEventListener("pause", updatePlay)
     video.addEventListener("ended", updatePlay)
 
-    video.addEventListener("loadedmetadata", () => {
-        if (isFinite(video.duration)) scrub.max = String(video.duration)
-    })
-    video.addEventListener("durationchange", () => {
-        if (isFinite(video.duration)) scrub.max = String(video.duration)
-    })
+    // The WebCodecs player dispatches `loadedmetadata`/`durationchange` from
+    // within `startPlayer` — i.e. before attachPlayerControls runs and can
+    // register listeners. Set scrub.max synchronously here too so we don't
+    // miss the initial state and end up with scrub.max stuck at the input's
+    // default of "100".
+    const syncScrubMax = () => {
+        if (isFinite(video.duration) && video.duration > 0) scrub.max = String(video.duration)
+    }
+    video.addEventListener("loadedmetadata", syncScrubMax)
+    video.addEventListener("durationchange", syncScrubMax)
+    syncScrubMax()
     video.addEventListener("timeupdate", () => {
         if (!scrubbing) scrub.value = String(video.currentTime)
         timeDisplay.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`

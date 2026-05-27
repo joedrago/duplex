@@ -14,6 +14,11 @@ const VIDEO_FRAME_QUEUE_TARGET = 24
 // buffer sources. Larger = more resilient to main-thread jank but more pending
 // state to tear down on seek.
 const AUDIO_SCHEDULE_LOOKAHEAD_S = 0.5
+// `decoder.decodeQueueSize` cap — the *real* input-side backpressure signal.
+// `decode()` is synchronous so we can hammer the decoder with chunks faster
+// than it produces output frames; the only way to slow ourselves down before
+// the decoder has caught up is to watch its own pending-input counter.
+const DECODER_QUEUE_CAP = 30
 // `requestAnimationFrame` cadence on the user's display is usually 60 Hz; the
 // presentation loop runs every rAF and only draws when a frame is due.
 
@@ -101,10 +106,14 @@ class PlayerController extends EventTarget {
         this.audioCtx = new AudioContext()
         this.audioGain = this.audioCtx.createGain()
         this.audioGain.connect(this.audioCtx.destination)
-        // Start suspended; we resume on first play() call. Some browsers reject
-        // a resume() that hasn't been preceded by a user gesture; the controls
-        // bar's play button is the gesture.
-        await this.audioCtx.suspend().catch(() => {})
+        console.log(`[player] audioCtx state at boot: ${this.audioCtx.state}`)
+        this.audioCtx.addEventListener("statechange", () => {
+            console.log(`[player] audioCtx statechange -> ${this.audioCtx.state}`)
+        })
+        // Don't force-suspend here. Chrome's autoplay policy already creates
+        // the context in "suspended" state if no user gesture has occurred,
+        // and Safari/Firefox often allow autoplay outright. Forcing suspend()
+        // here just adds a step we then have to resume around.
 
         // Open the source. UrlSource issues ranged fetches as Mediabunny needs
         // bytes; it's HTTP-driven, no preflight download.
@@ -156,6 +165,22 @@ class PlayerController extends EventTarget {
 
         // Seed the pumps at the requested start time (resume support).
         await this._restartAtTime(this.startAt)
+
+        // Diagnostic heartbeat — only when `?debug=1` is in the URL, so the
+        // steady-state log stays quiet but we can flip it on whenever the
+        // player misbehaves.
+        if (new URLSearchParams(location.search).has("debug")) {
+            this._heartbeatId = setInterval(() => {
+                if (this.disposed) return
+                console.log(
+                    `[player] hb: state=${this.audioCtx?.state} ` +
+                        `media=${this.currentTime.toFixed(2)}s ` +
+                        `vq=${this.videoFrameQueue.length} ` +
+                        `audioAhead=${(this.audioNextCtxTime - (this.audioCtx?.currentTime ?? 0)).toFixed(2)}s ` +
+                        `liveAudio=${this.liveAudioSources.size}`
+                )
+            }, 2000)
+        }
     }
 
     async _setupVideo() {
@@ -164,6 +189,11 @@ class PlayerController extends EventTarget {
             this.onError(`unknown video codec: ${await this.videoTrack.getCodec()}`)
             return
         }
+        console.log(
+            `[player] video config: codec=${cfg.codec} ` +
+                `coded=${cfg.codedWidth}x${cfg.codedHeight} ` +
+                `description=${cfg.description ? `${cfg.description.byteLength}B` : "none"}`
+        )
         const { supported } = await VideoDecoder.isConfigSupported(cfg)
         if (!supported) {
             const codec = await this.videoTrack.getCodec()
@@ -180,11 +210,15 @@ class PlayerController extends EventTarget {
         this.canvasCtx = this.canvas.getContext("2d")
         this.host.appendChild(this.canvas)
 
+        // Save a copy of the config so reconfigure-on-decoder-reset works.
+        this.videoConfig = cfg
         this.videoDecoder = new VideoDecoder({
             output: (frame) => this._onVideoFrame(frame),
             error: (e) => {
-                console.warn("[player] video decoder error", e)
-                this.onError(`video decoder error: ${e.message}`)
+                console.warn(
+                    `[player] video decoder error name=${e.name} message=${e.message} ` + `state=${this.videoDecoder?.state}`
+                )
+                this.onError(`video decoder error: ${e.message || e.name}`)
             }
         })
         this.videoDecoder.configure(cfg)
@@ -207,6 +241,7 @@ class PlayerController extends EventTarget {
             return
         }
 
+        this.audioConfig = cfg
         this.audioDecoder = new AudioDecoder({
             output: (data) => this._onAudioFrame(data),
             error: (e) => console.warn("[player] audio decoder error", e)
@@ -241,9 +276,29 @@ class PlayerController extends EventTarget {
         }
         this.liveAudioSources.clear()
 
-        // Flush decoders so subsequent decode() calls don't see stale state.
-        if (this.videoDecoder?.state === "configured") await this.videoDecoder.flush().catch(() => {})
-        if (this.audioDecoder?.state === "configured") await this.audioDecoder.flush().catch(() => {})
+        // Discard pending decoder work without emitting output. We do NOT
+        // use flush() here: flush() processes pending input and emits any
+        // remaining decoded frames, which on a backward seek would prepend
+        // future-timestamp frames to an otherwise-cleared queue, blocking
+        // the present loop (which only dequeues frames whose timestamp <=
+        // mediaTime). reset() throws those packets away and demotes the
+        // decoder to "unconfigured" — we configure() it again right after.
+        if (this.videoDecoder?.state === "configured") {
+            try {
+                this.videoDecoder.reset()
+                this.videoDecoder.configure(this.videoConfig)
+            } catch (e) {
+                console.warn("[player] videoDecoder reset/configure threw", e)
+            }
+        }
+        if (this.audioDecoder?.state === "configured") {
+            try {
+                this.audioDecoder.reset()
+                this.audioDecoder.configure(this.audioConfig)
+            } catch (e) {
+                console.warn("[player] audioDecoder reset/configure threw", e)
+            }
+        }
 
         if (this.disposed || gen !== this.gen) return
 
@@ -270,21 +325,36 @@ class PlayerController extends EventTarget {
 
     async _pumpVideo(startTime, gen, signal) {
         let pkt = await this.videoSink.getKeyPacket(startTime)
-        if (!pkt) return
+        if (!pkt) {
+            console.warn(`[player] no key packet at/before t=${startTime.toFixed(2)}s`)
+            return
+        }
+        console.log(
+            `[player] video pump: starting at t=${startTime.toFixed(2)}s ` +
+                `(first key packet t=${pkt.timestamp.toFixed(3)}s, ` +
+                `type=${pkt.type}, ${pkt.byteLength}B)`
+        )
         // The clearing of stale frames is handled in _onVideoFrame: anything
         // whose timestamp is below startTime gets dropped silently.
         this._discardFramesBefore = startTime
         while (pkt && !signal.aborted && gen === this.gen) {
-            // Backpressure: if the decoded queue is full and the audio clock
-            // hasn't caught up, wait.
-            while (this.videoFrameQueue.length >= VIDEO_FRAME_QUEUE_TARGET && !signal.aborted && gen === this.gen) {
+            // Two backpressure gates, both must clear:
+            //   (a) videoFrameQueue length — bounds memory after decode.
+            //   (b) videoDecoder.decodeQueueSize — bounds in-flight decode()
+            //       calls. `decode()` is synchronous so without (b) we'd hand
+            //       the decoder thousands of chunks before it produced a single
+            //       frame, defeating (a).
+            while (!signal.aborted && gen === this.gen) {
+                const outFull = this.videoFrameQueue.length >= VIDEO_FRAME_QUEUE_TARGET
+                const inFull = this.videoDecoder.decodeQueueSize >= DECODER_QUEUE_CAP
+                if (!outFull && !inFull) break
                 await sleep(16)
             }
             if (signal.aborted || gen !== this.gen) break
             try {
                 this.videoDecoder.decode(pkt.toEncodedVideoChunk())
             } catch (e) {
-                console.warn("[player] video decode threw", e)
+                console.warn(`[player] video decode threw at t=${pkt.timestamp.toFixed(3)}s`, e)
                 break
             }
             pkt = await this.videoSink.getNextPacket(pkt)
@@ -308,12 +378,25 @@ class PlayerController extends EventTarget {
         // We may still get a few frames whose start is < startTime; the audio
         // scheduler skips ones that would land in the past.
         while (pkt && !signal.aborted && gen === this.gen) {
-            // Backpressure: stay roughly `lookahead` ahead of the play head.
-            const ahead = this.audioNextCtxTime - this.audioCtx.currentTime
-            if (ahead > AUDIO_SCHEDULE_LOOKAHEAD_S) {
+            // Three backpressure gates, any one of them parks the pump:
+            //   (a) audio scheduled ahead of the clock — the natural "we've
+            //       buffered enough" signal.
+            //   (b) audioDecoder.decodeQueueSize — bounds in-flight decode()
+            //       calls so we can't outpace the decoder's output callback
+            //       and schedule thousands of AudioBufferSourceNodes in a
+            //       burst before the clock even ticks.
+            //   (c) liveAudioSources cap — hard ceiling on scheduled-but-not-
+            //       yet-played buffer sources. Without this, main-thread cost
+            //       of tracking 50k+ sources stalls the AudioContext clock.
+            while (!signal.aborted && gen === this.gen) {
+                const ahead = this.audioNextCtxTime - this.audioCtx.currentTime
+                const aheadFull = ahead > AUDIO_SCHEDULE_LOOKAHEAD_S
+                const inFull = this.audioDecoder.decodeQueueSize >= DECODER_QUEUE_CAP
+                const liveFull = this.liveAudioSources.size >= 100
+                if (!aheadFull && !inFull && !liveFull) break
                 await sleep(20)
-                continue
             }
+            if (signal.aborted || gen !== this.gen) break
             try {
                 this.audioDecoder.decode(pkt.toEncodedAudioChunk())
             } catch (e) {
@@ -391,7 +474,7 @@ class PlayerController extends EventTarget {
     _presentLoop() {
         this.rafId = requestAnimationFrame(() => this._presentLoop())
         if (this.disposed) return
-        const mediaTime = this.getCurrentTime()
+        const mediaTime = this.currentTime
 
         // Find the latest frame whose timestamp is <= mediaTime; drop earlier
         // frames; keep later ones for the next tick.
@@ -438,18 +521,18 @@ class PlayerController extends EventTarget {
 
     async play() {
         if (this.disposed) return
+        console.log(`[player] play() called; audioCtx.state=${this.audioCtx.state}`)
         this._ended = false
         if (this.audioCtx.state === "suspended") {
             try {
                 await this.audioCtx.resume()
+                console.log(`[player] audioCtx.resume() ok; state=${this.audioCtx.state}`)
             } catch (e) {
-                console.warn("[player] audioCtx.resume rejected (likely no user gesture yet)", e)
+                console.warn(`[player] audioCtx.resume rejected: ${e.message}`)
             }
         }
-        // Browsers gate AudioContext.resume() on a user gesture (autoplay
-        // policy). If resume didn't actually take effect, stay paused and
-        // let the user click play.
         if (this.audioCtx.state !== "running") {
+            console.log(`[player] not running after resume attempt (state=${this.audioCtx.state}); staying paused`)
             this._paused = true
             return
         }
@@ -459,6 +542,7 @@ class PlayerController extends EventTarget {
 
     async pause() {
         if (this.disposed) return
+        console.log(`[player] pause() called; audioCtx.state=${this.audioCtx.state}`)
         if (this.audioCtx.state === "running") await this.audioCtx.suspend()
         this._paused = true
         this.dispatchEvent(new Event("pause"))
