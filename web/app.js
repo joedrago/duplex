@@ -793,12 +793,38 @@ async function renderPlay(path) {
     // Matroska TrackNumber), which doesn't agree with ffprobe's `index` —
     // but the iteration order does, so we lean on that.
     const audioTracks = info.audio_tracks ?? []
+    // Pre-flight each audio track through `AudioDecoder.isConfigSupported`
+    // so we can label undecodable tracks (e.g. AC-3 in Chrome builds without
+    // the proprietary Dolby decoders) and pick a *supported* track at boot
+    // rather than silently muting on the user-default track.
+    const audioSupport = await Promise.all(
+        audioTracks.map(async (a) => {
+            if (!a.codec_string || !a.sample_rate || !a.channels) return false
+            try {
+                const { supported } = await AudioDecoder.isConfigSupported({
+                    codec: a.codec_string,
+                    sampleRate: a.sample_rate,
+                    numberOfChannels: a.channels
+                })
+                return !!supported
+            } catch {
+                return false
+            }
+        })
+    )
     const initialAudioOrd = (() => {
-        const enOrd = audioTracks.findIndex((a) => {
+        const isEng = (a) => {
             const lang = (a.language || "").toLowerCase()
             return lang === "en" || lang.startsWith("en-") || lang === "eng"
-        })
-        if (enOrd >= 0) return enOrd
+        }
+        // Prefer an English track the browser can decode; then any supported
+        // track; then English regardless; then track 0 as last resort.
+        const enSupported = audioTracks.findIndex((a, i) => audioSupport[i] && isEng(a))
+        if (enSupported >= 0) return enSupported
+        const anySupported = audioSupport.findIndex(Boolean)
+        if (anySupported >= 0) return anySupported
+        const en = audioTracks.findIndex(isEng)
+        if (en >= 0) return en
         return audioTracks.length > 0 ? 0 : -1
     })()
     const audioOptions =
@@ -807,9 +833,12 @@ async function renderPlay(path) {
                   const lang = a.language || `audio ${i + 1}`
                   const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
                   const ch = chInfo ? ` (${chInfo})` : ""
-                  return { value: String(i), label: `${lang}${ch}` }
+                  const codec = a.codec ? ` [${a.codec}]` : ""
+                  const unsupp = audioSupport[i] ? "" : " — unsupported"
+                  return { value: String(i), label: `${lang}${ch}${codec}${unsupp}` }
               })
             : []
+    const noPlayableAudio = audioTracks.length > 0 && audioSupport.every((s) => !s)
 
     const labelFor = (opts, val) => opts.find((o) => o.value === val)?.label ?? "?"
 
@@ -846,14 +875,22 @@ async function renderPlay(path) {
     // One UI everywhere: click on desktop, OK on remote, both pop the same
     // modal picker that already exists for tvOS.
     const subBtn = el("button", { className: "ctrl-subs", type: "button", title: "Subtitles" }, "CC Off")
+    // Show the audio button whenever the file has audio (even if only one
+    // track, so an "unsupported" status is still visible). The icon flips
+    // to 🔇 when the current selection isn't decodable by this browser.
+    const audioBtnLabel = () => {
+        const initUnsupported = initialAudioOrd >= 0 && !audioSupport[initialAudioOrd]
+        const icon = noPlayableAudio || initUnsupported ? "🔇" : "♪"
+        if (audioOptions.length === 0) {
+            const a = audioTracks[initialAudioOrd]
+            const codec = a?.codec ? ` [${a.codec}]` : ""
+            const suff = initUnsupported ? " — unsupported" : ""
+            return `${icon} ${a?.language || "audio"}${codec}${suff}`
+        }
+        return `${icon} ` + labelFor(audioOptions, String(initialAudioOrd))
+    }
     const audioBtn =
-        audioOptions.length > 0
-            ? el(
-                  "button",
-                  { className: "ctrl-audio", type: "button", title: "Audio" },
-                  "♪ " + labelFor(audioOptions, String(initialAudioOrd))
-              )
-            : null
+        audioTracks.length > 0 ? el("button", { className: "ctrl-audio", type: "button", title: "Audio" }, audioBtnLabel()) : null
 
     const controlBar = el(
         "div",
