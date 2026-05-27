@@ -772,17 +772,16 @@ async function renderPlay(path) {
     const host = el("div", { className: "player-host" })
     const cueOverlay = el("div", { className: "cue-overlay" })
 
-    // Subtitles are deferred to a later phase; the picker still exists so the
-    // layout stays consistent. Sidecars + text-format embedded subs are
-    // surfaced; image-format embedded subs are inventoried but unsupported.
+    // Sidecar subtitles (sibling .srt/.vtt/.ass) are fully supported: fetched
+    // raw via /api/sidecar and parsed client-side. Embedded subtitle tracks
+    // (mov_text/subrip inside the container) are NOT yet supported because
+    // Mediabunny doesn't currently expose subtitle tracks for reading; we
+    // inventory them in the manifest but hide them from the picker. Image-
+    // based subs (PGS/VobSub) were never supported.
     const subOptions = [{ value: "", label: "Off" }]
     info.sidecars?.forEach((s, i) => {
-        subOptions.push({ value: "sidecar:" + i, label: `${s.language || "?"} (sidecar ${s.format})` })
-    })
-    info.subtitle_tracks?.forEach((s) => {
-        if (s.format === "text") {
-            subOptions.push({ value: "embedded:" + s.index, label: `${s.language || "?"} (embedded ${s.codec || "text"})` })
-        }
+        const lang = s.language || "Subtitle"
+        subOptions.push({ value: "sidecar:" + i, label: `${lang} (${s.format})` })
     })
 
     // Audio options. Multi-track switching is implemented in a later phase;
@@ -960,6 +959,9 @@ async function renderPlay(path) {
     let activeCues = []
     let subsRafId = null
 
+    // Parse VTT / SRT into [{start, end, text}]. Both formats share the
+    // `HH:MM:SS.mmm --> HH:MM:SS.mmm` cue header line; SRT uses commas
+    // instead of dots, which the comma→dot normalization handles.
     const parseVTT = (text) => {
         const parseTime = (s) => {
             const parts = s.replace(",", ".").split(":")
@@ -987,6 +989,109 @@ async function renderPlay(path) {
         return cues
     }
 
+    // Parse ASS / SSA dialogue lines into [{start, end, text}]. ASS supports
+    // styling (font, color, positioning), karaoke timing, etc., but we
+    // deliberately downconvert to plain text — JASSUB or libass-via-WASM is
+    // a future opt-in dependency. Strips `{\\tag}` codes and replaces `\N`
+    // / `\n` with newlines.
+    const parseASS = (text) => {
+        const parseTime = (s) => {
+            // ASS time format: H:MM:SS.cs (centiseconds, two-digit).
+            const parts = s.trim().split(":")
+            if (parts.length !== 3) return 0
+            return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2])
+        }
+        const lines = text.replace(/\r/g, "").split("\n")
+        let format = null
+        let inEvents = false
+        const cues = []
+        for (const raw of lines) {
+            const line = raw.trim()
+            if (line.startsWith("[")) {
+                inEvents = line.toLowerCase() === "[events]"
+                continue
+            }
+            if (!inEvents) continue
+            if (line.toLowerCase().startsWith("format:")) {
+                format = line
+                    .slice(7)
+                    .split(",")
+                    .map((s) => s.trim().toLowerCase())
+                continue
+            }
+            if (!line.toLowerCase().startsWith("dialogue:") || !format) continue
+            // Dialogue: <Format-columns-comma-separated, with the last column
+            // (Text) potentially containing commas itself>. Split on the first
+            // N-1 commas and treat the remainder as the text field.
+            const payload = line.slice(9)
+            const cols = []
+            let rest = payload
+            for (let i = 0; i < format.length - 1; i++) {
+                const c = rest.indexOf(",")
+                if (c < 0) break
+                cols.push(rest.slice(0, c).trim())
+                rest = rest.slice(c + 1)
+            }
+            cols.push(rest)
+            const get = (name) => cols[format.indexOf(name)]
+            const start = parseTime(get("start") || "")
+            const end = parseTime(get("end") || "")
+            const body = (get("text") || "")
+                .replace(/\{[^}]*\}/g, "") // override blocks {\\i1}, {\\pos(...)}, etc.
+                .replace(/\\N/g, "\n")
+                .replace(/\\n/g, "\n")
+                .replace(/\\h/g, " ")
+                .trim()
+            if (body && end > start) cues.push({ start, end, text: body })
+        }
+        return cues
+    }
+
+    // SubViewer 1/2 format. Sometimes shipped with the wrong extension
+    // (`.srt`) — common with old encoder pipelines (e.g. YIFY-era releases).
+    // Header block at the top (`[INFORMATION]`, `[STYLE]`, …) followed by
+    // cues whose times share one line, comma-separated:
+    //     HH:MM:SS.cc,HH:MM:SS.cc
+    //     <text lines until blank line>
+    // `[br]` inside text is the SubViewer line break.
+    const parseSubViewer = (text) => {
+        const parseTime = (s) => {
+            const parts = s.trim().split(":")
+            if (parts.length !== 3) return NaN
+            return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2])
+        }
+        const cues = []
+        const blocks = text.replace(/\r/g, "").split(/\n\n+/)
+        for (const block of blocks) {
+            const lines = block.split("\n")
+            if (lines.length < 2) continue
+            const m = lines[0].match(/^(\d{1,2}:\d{2}:\d{2}\.\d{1,3}),(\d{1,2}:\d{2}:\d{2}\.\d{1,3})\s*$/)
+            if (!m) continue
+            const start = parseTime(m[1])
+            const end = parseTime(m[2])
+            if (!isFinite(start) || !isFinite(end) || end <= start) continue
+            const body = lines
+                .slice(1)
+                .join("\n")
+                .replace(/\[br\]/gi, "\n")
+                .trim()
+            if (body) cues.push({ start, end, text: body })
+        }
+        return cues
+    }
+
+    // Pick a parser based on the declared format AND a quick content sniff —
+    // files with the wrong extension are common (.srt that's actually
+    // SubViewer, .vtt that's actually SRT, etc.).
+    const parseSubtitle = (text, format) => {
+        const head = text.slice(0, 256)
+        if (/^\s*WEBVTT/i.test(head)) return parseVTT(text)
+        if (/\[Script Info\]/i.test(head) || format === "ass" || format === "ssa") return parseASS(text)
+        if (/\[INFORMATION\]|\[TITLE\]|\[SUBTITLE\]/i.test(head)) return parseSubViewer(text)
+        // SubRip and "VTT without the header" both work through parseVTT.
+        return parseVTT(text)
+    }
+
     const renderSubs = () => {
         subsRafId = null
         if (!cueOverlay.isConnected) return
@@ -1011,10 +1116,9 @@ async function renderPlay(path) {
         if (subsRafId == null) subsRafId = requestAnimationFrame(renderSubs)
     }
 
-    // tvOS UIWebView's fetch will happily hang forever if the server-side
-    // sub extraction stalls — the user picks a track and nothing ever
-    // shows. Bound it with AbortController and surface failures on the
-    // button label so the picker reflects reality.
+    // Fetch a sidecar subtitle via /api/sidecar (raw bytes) and parse it
+    // client-side. AbortController bounds the fetch so a stalled response
+    // can't leave the picker in a "loading forever" state.
     const SUBS_FETCH_TIMEOUT_MS = 30000
     const applySubChoice = async (value) => {
         cueGen++
@@ -1025,12 +1129,24 @@ async function renderPlay(path) {
         activeCues = []
         cueOverlay.textContent = ""
         if (!value) return
+        const [kind, idxStr] = value.split(":")
+        if (kind !== "sidecar") {
+            console.warn(`[subs] unsupported track kind: ${kind}`)
+            subBtn.textContent = "CC ⚠ " + label + " (unsupported)"
+            currentSubValue = ""
+            return
+        }
+        const sc = info.sidecars?.[parseInt(idxStr, 10)]
+        if (!sc) {
+            subBtn.textContent = "CC ⚠ " + label + " (missing)"
+            currentSubValue = ""
+            return
+        }
         const ctrl = new AbortController()
         const timer = setTimeout(() => ctrl.abort(), SUBS_FETCH_TIMEOUT_MS)
-        const url = `/api/subs?path=${encodeURIComponent(path)}&track=${encodeURIComponent(value)}`
-        console.log(`[subs] fetching ${value} (${label})`)
+        console.log(`[subs] fetching ${sc.url} (${label}, format=${sc.format})`)
         try {
-            const r = await fetch(url, { signal: ctrl.signal })
+            const r = await fetch(sc.url, { signal: ctrl.signal })
             if (gen !== cueGen) return
             if (!r.ok) {
                 console.error(`[subs] fetch failed: ${r.status} ${r.statusText} for ${value}`)
@@ -1040,7 +1156,7 @@ async function renderPlay(path) {
             }
             const text = await r.text()
             if (gen !== cueGen) return
-            activeCues = parseVTT(text)
+            activeCues = parseSubtitle(text, sc.format)
             console.log(`[subs] loaded ${activeCues.length} cues for ${value}`)
             if (activeCues.length === 0) {
                 subBtn.textContent = "CC ⚠ " + label + " (empty)"

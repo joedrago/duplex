@@ -541,15 +541,29 @@ class PlayerController extends EventTarget {
             data.close()
             return
         }
-        // Build an AudioBuffer and schedule it.
-        const channels = data.numberOfChannels
+        // Downmix to stereo. Web Audio's automatic "speakers" downmix only
+        // covers mono/stereo/quad/5.1; for 7.1 it falls back to a discrete
+        // copy that drops the center channel (where speech lives). We always
+        // emit a 2-channel buffer to keep behavior consistent across layouts
+        // and avoid implementation-specific quirks.
+        const inChs = data.numberOfChannels
         const frames = data.numberOfFrames
-        const buf = this.audioCtx.createBuffer(channels, frames, data.sampleRate)
+        const buf = this.audioCtx.createBuffer(2, frames, data.sampleRate)
+        const L = new Float32Array(frames)
+        const R = new Float32Array(frames)
         const planar = new Float32Array(frames)
-        for (let ch = 0; ch < channels; ch++) {
-            data.copyTo(planar, { planeIndex: ch, format: "f32-planar" })
-            buf.copyToChannel(planar, ch)
+        for (let inCh = 0; inCh < inChs; inCh++) {
+            data.copyTo(planar, { planeIndex: inCh, format: "f32-planar" })
+            const [lG, rG] = downmixGains(inChs, inCh)
+            if (lG !== 0) {
+                for (let i = 0; i < frames; i++) L[i] += planar[i] * lG
+            }
+            if (rG !== 0) {
+                for (let i = 0; i < frames; i++) R[i] += planar[i] * rG
+            }
         }
+        buf.copyToChannel(L, 0)
+        buf.copyToChannel(R, 1)
         data.close()
         const src = this.audioCtx.createBufferSource()
         src.buffer = buf
@@ -647,9 +661,18 @@ class PlayerController extends EventTarget {
     async seek(t) {
         if (this.disposed) return
         const clamped = Math.max(0, Math.min(t, this._duration || t))
-        await this._restartAtTime(clamped)
+        // Rebase the master clock *synchronously* so subsequent
+        // `currentTime` reads return the new position immediately. Without
+        // this, rapid back-to-back seeks (e.g. two Left presses) compute
+        // their delta against the still-old getter value and collapse onto
+        // the same target. `_restartAtTime` rebases again at the end of its
+        // teardown sequence — this is just an early commit.
+        this.audioBaseMediaTime = clamped
+        this.audioBaseCtxTime = this.audioCtx.currentTime
+        this.audioNextCtxTime = this.audioBaseCtxTime
         this.onTimeUpdate(clamped)
         this.dispatchEvent(new Event("timeupdate"))
+        await this._restartAtTime(clamped)
     }
 
     get currentTime() {
@@ -773,4 +796,59 @@ function makeAbortable(fn) {
 
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms))
+}
+
+// Per-channel L/R gains for downmixing an `inChs`-channel WebCodecs AudioData
+// frame to stereo. Channel order follows WAVE_FORMAT_EXTENSIBLE / WebCodecs
+// convention: FL, FR, FC, LFE, BL, BR, SL, SR. Gains for the center / surround
+// channels follow ITU-R BS.775-1 (0.707 = -3 dB) so dialogue (center) stays
+// audible. LFE is dropped — no good way to fold subbass into stereo without
+// surprising people on small speakers. Unknown layouts fall back to copying
+// ch0→L and ch1→R; everything else is silenced.
+const C707 = 0.707
+function downmixGains(inChs, ch) {
+    if (inChs === 1) return [1, 1] // mono → both
+    if (inChs === 2) return ch === 0 ? [1, 0] : [0, 1]
+    if (inChs === 6) {
+        // 5.1: FL, FR, FC, LFE, BL, BR
+        switch (ch) {
+            case 0:
+                return [1, 0]
+            case 1:
+                return [0, 1]
+            case 2:
+                return [C707, C707]
+            case 3:
+                return [0, 0]
+            case 4:
+                return [C707, 0]
+            case 5:
+                return [0, C707]
+        }
+    }
+    if (inChs === 8) {
+        // 7.1: FL, FR, FC, LFE, BL, BR, SL, SR
+        switch (ch) {
+            case 0:
+                return [1, 0]
+            case 1:
+                return [0, 1]
+            case 2:
+                return [C707, C707]
+            case 3:
+                return [0, 0]
+            case 4:
+                return [C707, 0]
+            case 5:
+                return [0, C707]
+            case 6:
+                return [C707, 0]
+            case 7:
+                return [0, C707]
+        }
+    }
+    // Unknown layout — take ch 0 and 1 as a best-effort L/R; drop the rest.
+    if (ch === 0) return [1, 0]
+    if (ch === 1) return [0, 1]
+    return [0, 0]
 }
