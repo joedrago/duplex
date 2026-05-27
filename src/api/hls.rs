@@ -18,6 +18,7 @@ use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 
+use crate::api::codec_string::{avc1_string, hvc1_string};
 use crate::api::{vpath, AppState};
 use crate::capability::{self, Decision};
 use crate::library::Node;
@@ -276,41 +277,6 @@ fn codec_string_for(stream: Option<&crate::probe::Stream>) -> String {
     // re-encodes anything non-AAC to stereo AAC, and AAC passthrough is
     // already AAC-LC in practice. mp4a.40.2 is the matching string.
     format!("{video},mp4a.40.2")
-}
-
-// avc1.PPCCLL — PP = profile_idc (hex), CC = profile compatibility flags
-// (we don't have these from ffprobe without parsing the SPS, so use 0x00),
-// LL = level_idc (hex). ffprobe surfaces profile as a human string and level
-// as the integer level_idc value (e.g. 41 for level 4.1 → 0x29).
-fn avc1_string(profile: Option<&str>, level: Option<i32>) -> String {
-    let profile_idc = match profile.unwrap_or("") {
-        "Constrained Baseline" | "Baseline" => 66,
-        "Main" => 77,
-        "Extended" => 88,
-        "High" => 100,
-        "High 10" | "High 10 Intra" => 110,
-        "High 4:2:2" | "High 4:2:2 Intra" => 122,
-        "High 4:4:4 Predictive" | "High 4:4:4 Intra" | "High 4:4:4" => 244,
-        // Unknown profile — declare High (the most common) so MSE at least
-        // tries; if the init segment disagrees we'll fail loudly anyway.
-        _ => 100,
-    };
-    let level_idc = level.unwrap_or(31) as u32;
-    format!("avc1.{:02x}00{:02x}", profile_idc, level_idc)
-}
-
-// hvc1.<gps><pi>.<compat>.<tier><li>.<constraints> — without parsing the
-// HEVC VPS/SPS we can only build a best-effort string from profile + level.
-// ffprobe reports HEVC level as level_idc (e.g. 120 = level 4.0, 150 = level
-// 5.0); the codec-string form just embeds that as the L-suffix integer.
-fn hvc1_string(profile: Option<&str>, level: Option<i32>) -> String {
-    let (profile_idc, compat) = match profile.unwrap_or("") {
-        "Main 10" => (2, "4"),
-        // Main, Main Still Picture, anything else — default to Main.
-        _ => (1, "6"),
-    };
-    let level_idc = level.unwrap_or(120);
-    format!("hvc1.{profile_idc}.{compat}.L{level_idc}.B0")
 }
 
 fn bandwidth_estimate(probe: &Probe, _decision: Decision) -> u64 {

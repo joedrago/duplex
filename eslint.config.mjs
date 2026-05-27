@@ -8,7 +8,7 @@ export default [
     },
     {
         files: ["**/*.{js,mjs,cjs}"],
-        languageOptions: { globals: { ...globals.browser, Hls: "readonly" } },
+        languageOptions: { globals: { ...globals.browser } },
         rules: {
             "no-unused-vars": [
                 "error",

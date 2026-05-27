@@ -555,31 +555,18 @@ function prettySize(n) {
     return `${n.toFixed(n < 10 ? 2 : 1)} ${u[i]}`
 }
 
-let activeHls = null
-let activeRecovery = null
 let activeVideo = null
 
 function teardownPlayer() {
-    if (activeRecovery) {
-        activeRecovery.stop()
-        activeRecovery = null
-    }
-    if (activeHls) {
-        activeHls.destroy()
-        activeHls = null
-    }
-    // Destroy the prior <video> aggressively. UIWebView's media pipeline on
-    // tvOS will keep decoding audio from a detached element if you only
-    // remove it from the DOM — pause + clear src + load() is what actually
-    // releases the underlying AVPlayer so the new playback doesn't start
-    // on top of the old one.
+    // The WebCodecs player owns its decoders, Mediabunny input, AudioContext,
+    // and canvas — disposing the controller releases all of it. Synchronous
+    // from the caller's perspective; the underlying close()s are best-effort
+    // and run to completion in the background.
     if (activeVideo) {
         try {
-            activeVideo.pause()
-            activeVideo.removeAttribute("src")
-            activeVideo.load()
+            activeVideo.dispose?.()
         } catch (e) {
-            console.warn("[player] teardown video threw", e)
+            console.warn("[player] teardown threw", e)
         }
         activeVideo = null
     }
@@ -672,145 +659,6 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
     }
 
     window.duplexPlayer = { handleKey, teardown: () => {} }
-}
-
-// Keeps the HLS pipeline alive in the face of transient muxer errors,
-// audio-track switches that never finish buffering, and other "the
-// player gave up" cases. Standard hls.js recovery (recoverMediaError /
-// startLoad) handles the easy cases; for everything else we fall back
-// to a full source reload at the last known position. A stall watchdog
-// catches the case where the player thinks it's playing but the media
-// element hasn't advanced.
-// Error details that signal "this browser cannot ever play this stream" —
-// typically a codec the MSE pipeline doesn't decode (e.g. 10-bit H.264 on
-// Firefox/macOS). Retrying with recoverMediaError or a fresh manifest load
-// won't change the outcome, so we surface a clean message to the caller
-// instead of looping through reload attempts.
-const HLS_UNRECOVERABLE_DETAILS = new Set([
-    "manifestIncompatibleCodecsError",
-    "bufferIncompatibleCodecsError",
-    "bufferAddCodecError"
-])
-
-function installHlsRecovery({ hls, video, getMasterUrl, onUnplayable }) {
-    let lastTime = 0
-    let lastAdvanceAt = performance.now()
-    let recoveryAttempts = 0
-    let reloadPending = false
-    let stopped = false
-
-    const onTimeUpdate = () => {
-        if (!Number.isNaN(video.currentTime) && video.currentTime > 0) {
-            if (video.currentTime !== lastTime) {
-                lastAdvanceAt = performance.now()
-            }
-            lastTime = video.currentTime
-        }
-    }
-    video.addEventListener("timeupdate", onTimeUpdate)
-
-    const onFragLoaded = () => {
-        recoveryAttempts = 0
-    }
-    hls.on(window.Hls.Events.FRAG_LOADED, onFragLoaded)
-
-    const fullReload = () => {
-        if (stopped || reloadPending) return
-        reloadPending = true
-        const wasPlaying = !video.paused
-        const resumeAt = lastTime
-        console.warn(`[hls] full reload at ${resumeAt.toFixed(2)}s`)
-        try {
-            hls.loadSource(getMasterUrl())
-        } catch (e) {
-            console.warn("[hls] loadSource threw", e)
-        }
-        const onCanPlay = () => {
-            video.removeEventListener("canplay", onCanPlay)
-            if (resumeAt > 0) video.currentTime = resumeAt
-            if (wasPlaying) video.play().catch(() => {})
-            reloadPending = false
-            lastAdvanceAt = performance.now()
-        }
-        video.addEventListener("canplay", onCanPlay)
-        // If `canplay` never fires (e.g. the new manifest also fails),
-        // clear the latch after a generous timeout so the watchdog can
-        // attempt another reload.
-        setTimeout(() => {
-            if (reloadPending) {
-                video.removeEventListener("canplay", onCanPlay)
-                reloadPending = false
-            }
-        }, 30000)
-    }
-
-    const onError = (_evt, data) => {
-        if (!data.fatal) return
-        console.warn("[hls] fatal error", data.type, data.details)
-        if (HLS_UNRECOVERABLE_DETAILS.has(data.details)) {
-            stopped = true
-            clearInterval(watchdog)
-            video.removeEventListener("timeupdate", onTimeUpdate)
-            try {
-                hls.off(window.Hls.Events.ERROR, onError)
-                hls.destroy()
-            } catch (e) {
-                console.warn("[hls] teardown threw", e)
-            }
-            onUnplayable?.(data.details)
-            return
-        }
-        if (recoveryAttempts < 2) {
-            recoveryAttempts++
-            try {
-                if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
-                    hls.recoverMediaError()
-                    return
-                }
-                if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-                    hls.startLoad()
-                    return
-                }
-            } catch (e) {
-                console.warn("[hls] recovery threw", e)
-            }
-        }
-        fullReload()
-    }
-    hls.on(window.Hls.Events.ERROR, onError)
-
-    // Stall watchdog: if we expect to be playing but currentTime hasn't
-    // moved for STALL_LIMIT_MS, force a full reload. Catches the case
-    // where hls.js has silently given up and isn't emitting errors.
-    const STALL_LIMIT_MS = 15000
-    const watchdog = setInterval(() => {
-        if (stopped || video.paused || reloadPending) return
-        const sinceAdvance = performance.now() - lastAdvanceAt
-        if (sinceAdvance > STALL_LIMIT_MS && video.readyState < 3) {
-            console.warn(`[hls] stalled ${(sinceAdvance / 1000).toFixed(1)}s, reloading`)
-            fullReload()
-        }
-    }, 2000)
-
-    return {
-        notePosition(t) {
-            if (typeof t === "number" && !Number.isNaN(t)) {
-                lastTime = t
-                lastAdvanceAt = performance.now()
-            }
-        },
-        stop() {
-            stopped = true
-            clearInterval(watchdog)
-            video.removeEventListener("timeupdate", onTimeUpdate)
-            try {
-                hls.off(window.Hls.Events.ERROR, onError)
-                hls.off(window.Hls.Events.FRAG_LOADED, onFragLoaded)
-            } catch (_) {
-                void _
-            }
-        }
-    }
 }
 
 function renderSettings() {
@@ -907,42 +755,39 @@ async function renderPlay(path) {
     app.replaceChildren(el("p", null, "loading…"))
     let info
     try {
-        info = await getJSON("/api/file?path=" + encodeURIComponent(path))
+        info = await getJSON("/api/manifest?path=" + encodeURIComponent(path))
     } catch (e) {
         app.replaceChildren(el("div", { className: "error" }, "load failed: " + e.message))
         return
     }
 
-    if (info.decision === "unsupported") {
-        const vc = info.probe?.streams?.find((s) => s.codec_type === "video")?.codec_name || "?"
-        app.replaceChildren(
-            el("div", { className: "error" }, `unsupported: video codec ${vc} is not in this device's capability matrix.`),
-            detailsBlock(info)
-        )
+    if (!info.video_tracks?.length) {
+        app.replaceChildren(el("div", { className: "error" }, "no video track in this file"), detailsBlock(info))
         return
     }
 
-    const video = el("video", { playsInline: true, autoplay: true })
-    activeVideo = video
+    // The canvas + audio graph live inside `host`; the controller exposes a
+    // <video>-shaped API (currentTime, paused, addEventListener…) so the
+    // existing controls bar plumbing in attachPlayerControls stays as-is.
+    const host = el("div", { className: "player-host" })
     const cueOverlay = el("div", { className: "cue-overlay" })
 
-    // Subtitle options. Always include "Off" as the first entry so the
-    // picker has somewhere to land. Sidecars and text-format embedded
-    // streams are both surfaced; image-format embedded streams are skipped
-    // (we have no renderer for PGS/VobSub on the web client).
+    // Subtitles are deferred to a later phase; the picker still exists so the
+    // layout stays consistent. Sidecars + text-format embedded subs are
+    // surfaced; image-format embedded subs are inventoried but unsupported.
     const subOptions = [{ value: "", label: "Off" }]
     info.sidecars?.forEach((s, i) => {
         subOptions.push({ value: "sidecar:" + i, label: `${s.language || "?"} (sidecar ${s.format})` })
     })
-    info.embedded_subs?.forEach((s) => {
+    info.subtitle_tracks?.forEach((s) => {
         if (s.format === "text") {
             subOptions.push({ value: "embedded:" + s.index, label: `${s.language || "?"} (embedded ${s.codec || "text"})` })
         }
     })
 
-    // Audio options. Only meaningful when HLS is in play and there's more
-    // than one track — direct play hands the raw file to the browser and we
-    // can't switch tracks server-side from there.
+    // Audio options. Multi-track switching is implemented in a later phase;
+    // for now the picker is shown when >1 track exists but only displays the
+    // initial selection.
     const audioTracks = info.audio_tracks ?? []
     const initialAudioIdx = (() => {
         const enTrack = audioTracks.find((a) => {
@@ -952,7 +797,7 @@ async function renderPlay(path) {
         return (enTrack || audioTracks[0])?.index
     })()
     const audioOptions =
-        info.decision !== "direct" && audioTracks.length > 1
+        audioTracks.length > 1
             ? audioTracks.map((a, i) => {
                   const lang = a.language || `audio ${i + 1}`
                   const chInfo = a.channel_layout || (a.channels ? `${a.channels}ch` : null)
@@ -1030,48 +875,50 @@ async function renderPlay(path) {
         else location.hash = "#/browse/"
     })
 
-    const stage = el("div", { className: "player-stage" }, video, cueOverlay, backBtn, controlBar)
+    const stage = el("div", { className: "player-stage" }, host, cueOverlay, backBtn, controlBar)
     const wrap = el("div", { className: "player" }, stage, detailsBlock(info))
     app.replaceChildren(wrap)
 
-    const masterUrlFor = (audioIdx) => `${info.urls.master}${audioIdx !== undefined ? `?audio=${audioIdx}` : ""}`
     let currentAudio = initialAudioIdx
     let currentSubValue = ""
+    void currentAudio
+    void currentSubValue
 
-    if (info.decision === "direct") {
-        video.src = info.urls.raw
-    } else if (window.Hls && window.Hls.isSupported()) {
-        const hls = new window.Hls({ debug: false })
-        activeHls = hls
-        hls.loadSource(masterUrlFor(initialAudioIdx))
-        hls.attachMedia(video)
-        activeRecovery = installHlsRecovery({
-            hls,
-            video,
-            getMasterUrl: () => masterUrlFor(currentAudio),
-            // MSE rejected a codec we declared (e.g. 10-bit H.264 on Firefox).
-            // Show a clean inline error instead of letting hls.js spam the
-            // console with retry attempts that can't possibly succeed.
-            onUnplayable: (detail) => {
-                const vc = info.probe?.streams?.find((s) => s.codec_type === "video")?.codec_name || "?"
-                const profile = info.probe?.streams?.find((s) => s.codec_type === "video")?.profile || ""
-                const desc = profile ? `${vc} (${profile})` : vc
-                app.replaceChildren(
-                    el(
-                        "div",
-                        { className: "error" },
-                        `this browser can't decode ${desc} via MSE (hls.js: ${detail}). try Safari or a native player.`
-                    ),
-                    detailsBlock(info)
-                )
+    // Resume position from localStorage. The controller seeks here once
+    // metadata is ready; attachPlayerControls below also wires the periodic
+    // heartbeat that persists position back as playback advances.
+    const startAt = (() => {
+        const entry = getResume(path)
+        return entry?.pos > 0 ? entry.pos : 0
+    })()
+
+    let controller
+    try {
+        const { startPlayer } = await import("/player.js")
+        controller = await startPlayer({
+            host,
+            manifest: info,
+            startAt,
+            onError: (msg) => {
+                app.replaceChildren(el("div", { className: "error" }, msg), detailsBlock(info))
             }
         })
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = masterUrlFor(initialAudioIdx)
-    } else {
-        app.replaceChildren(el("div", { className: "error" }, "no HLS support in this browser"))
+        // Bridge: app.js's controls plumbing knows it as `video`; the
+        // PlayerController exposes a compatible API + EventTarget surface.
+        // Click-to-play needs a real DOM target since the controller isn't
+        // in the DOM.
+        host.addEventListener("click", () => {
+            controller.paused ? controller.play() : controller.pause()
+        })
+        // Kick playback now that everything is wired.
+        await controller.play()
+    } catch (e) {
+        console.error("[player] startup failed", e)
+        app.replaceChildren(el("div", { className: "error" }, "player failed to start: " + e.message), detailsBlock(info))
         return
     }
+    const video = controller
+    activeVideo = controller
 
     // Subtitle rendering. We deliberately avoid the native <track> element:
     // tvOS UIWebView's VTT pipeline crashes on cue boundaries, and even on
@@ -1181,30 +1028,14 @@ async function renderPlay(path) {
         }
     }
 
-    // Apply an audio choice: hls.js gets a new master URL; native HLS
-    // (Safari, tvOS UIWebView) can't swap tracks via API so we reload the
-    // whole source with the audio query param and seek back to position.
+    // Apply an audio choice. Phase 4 will implement track switching in the
+    // WebCodecs player; for now the picker shows the current selection but
+    // selecting a different track logs a warning and stays on the first.
     const applyAudioChoice = (value) => {
         const audioIdx = parseInt(value, 10)
         if (audioIdx === currentAudio) return
-        const curTime = video.currentTime
-        const wasPlaying = !video.paused
-        console.log(`[audio] switch ${currentAudio} -> ${audioIdx} at t=${curTime.toFixed(2)}`)
-        currentAudio = audioIdx
-        if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, value)
-        if (activeRecovery) activeRecovery.notePosition(curTime)
-        const newUrl = masterUrlFor(audioIdx)
-        if (activeHls) {
-            activeHls.loadSource(newUrl)
-        } else {
-            video.src = newUrl
-            video.load()
-        }
-        video.addEventListener("canplay", function onCanPlay() {
-            video.removeEventListener("canplay", onCanPlay)
-            video.currentTime = curTime
-            if (wasPlaying) video.play()
-        })
+        console.warn(`[audio] multi-track switching is not yet implemented (requested ${audioIdx})`)
+        if (audioBtn) audioBtn.textContent = "♪ " + labelFor(audioOptions, String(currentAudio))
     }
 
     const openSubsPicker = () => {
@@ -1490,12 +1321,7 @@ function detailsBlock(info) {
     if (!new URLSearchParams(window.location.search).has("debug")) {
         return document.createDocumentFragment()
     }
-    return el(
-        "details",
-        null,
-        el("summary", null, `${info.decision} — ${info.path}`),
-        el("pre", null, JSON.stringify(info.probe, null, 2))
-    )
+    return el("details", null, el("summary", null, info.path || "(no path)"), el("pre", null, JSON.stringify(info, null, 2)))
 }
 
 function render() {

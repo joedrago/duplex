@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use axum::http::{HeaderName, HeaderValue};
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Cli;
@@ -11,12 +13,15 @@ use crate::probe::ProbeCache;
 use crate::stream::StreamCache;
 
 pub mod browse;
+pub mod codec_string;
 pub mod debug;
 pub mod file;
 pub mod hls;
+pub mod manifest;
 pub mod next;
 pub mod raw;
 pub mod recent;
+pub mod sidecar;
 pub mod subs;
 pub mod vpath;
 pub mod web;
@@ -38,10 +43,18 @@ pub fn router(state: AppState) -> Router {
         CorsLayer::new()
     };
 
+    // Cross-origin isolation: COOP+COEP make the page `crossOriginIsolated`,
+    // unlocking `SharedArrayBuffer` and threaded WebAssembly for the client-
+    // side player. CORP same-origin tags every response so it can be loaded
+    // under COEP `require-corp` from our own document. Duplex is a single-
+    // origin LAN server, so locking everything to same-origin is the safe
+    // default.
     Router::new()
         .merge(browse::routes())
         .merge(file::routes())
+        .merge(manifest::routes())
         .merge(raw::routes())
+        .merge(sidecar::routes())
         .merge(hls::routes())
         .merge(subs::routes())
         .merge(recent::routes())
@@ -50,5 +63,17 @@ pub fn router(state: AppState) -> Router {
         .merge(web::routes())
         .with_state(state)
         .layer(cors)
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-embedder-policy"),
+            HeaderValue::from_static("require-corp"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
         .layer(TraceLayer::new_for_http())
 }
