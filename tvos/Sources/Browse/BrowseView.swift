@@ -27,6 +27,15 @@ final class BrowseViewModel: ObservableObject {
     }
 }
 
+/// The two kinds of things that can be focused in BrowseView: an entry row in
+/// the main list, or a letter on the alphabet rail. Modeled as a single enum
+/// so we can hand both columns to `WrapColumns` and let its left/right wrap
+/// navigation jump between the list and the rail.
+enum BrowseFocus: Hashable {
+    case entry(String)
+    case letter(String)
+}
+
 struct BrowseView: View {
     let dirPath: String
 
@@ -34,20 +43,20 @@ struct BrowseView: View {
     @ObservedObject private var sort = SortPreference.shared
     @ObservedObject private var lastSel = LastSelectionStore.shared
     @EnvironmentObject private var nav: NavCoordinator
-    @State private var focusedName: String?
+    @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
 
     var body: some View {
         VStack(spacing: 0) {
             BrowseHeader(crumbPath: dirPath)
             WrapColumns(
-                columns: [sortedEntryNames],
-                current: $focusedName,
+                columns: focusColumns,
+                current: $focusedKey,
                 onActivate: handleActivate,
                 onPlayPause: { sort.toggle() },
                 onMenuTap: { nav.path.removeLast() }
             ) {
-                content
+                contentRow
                     .padding(.horizontal, 40)
                     .padding(.bottom, 32)
             }
@@ -67,7 +76,7 @@ struct BrowseView: View {
             // no-ops and the .task → applyInitialFocusIfNeeded path handles it.)
             if let remembered = lastSel.get(dir: dirPath),
                sortedEntryNames.contains(remembered) {
-                focusedName = remembered
+                focusedKey = .entry(remembered)
             }
         }
         .onChange(of: sortedEntryNames) { _, _ in applyInitialFocusIfNeeded() }
@@ -76,10 +85,12 @@ struct BrowseView: View {
             // new ordering rather than leaving the user mid-list at a row
             // whose neighbors have changed underneath them.
             if let first = sortedEntryNames.first {
-                focusedName = first
+                focusedKey = .entry(first)
             }
         }
     }
+
+    // MARK: - data
 
     private var sortedEntries: [Entry] {
         if case .loaded(let entries) = vm.state { return sortedEntriesList(entries) }
@@ -88,15 +99,59 @@ struct BrowseView: View {
 
     private var sortedEntryNames: [String] { sortedEntries.map(\.name) }
 
+    /// Letters present in this directory's entries, in alphabetical order.
+    /// Non-alpha leading characters (digits, symbols) collapse under "#".
+    private var availableLetters: [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for entry in sortedEntries {
+            let letter = firstLetter(of: entry.name)
+            if seen.insert(letter).inserted {
+                ordered.append(letter)
+            }
+        }
+        return ordered.sorted()
+    }
+
+    private func firstLetter(of name: String) -> String {
+        guard let first = name.unicodeScalars.first else { return "#" }
+        if CharacterSet.letters.contains(first) {
+            return String(first).uppercased()
+        }
+        return "#"
+    }
+
+    /// Show the rail only when the sort gives the user a navigable alphabetical
+    /// ordering to jump within, and when there are enough buckets that jumping
+    /// is actually faster than scrolling.
+    private var showRail: Bool {
+        sort.mode == .name && availableLetters.count >= 3
+    }
+
+    private var focusColumns: [[BrowseFocus]] {
+        let entryCol = sortedEntryNames.map { BrowseFocus.entry($0) }
+        if showRail {
+            return [entryCol, availableLetters.map { BrowseFocus.letter($0) }]
+        }
+        return [entryCol]
+    }
+
+    // MARK: - layout
+
     @ViewBuilder
-    private var content: some View {
+    private var contentRow: some View {
         switch vm.state {
         case .idle, .loading:
             LoadingColumn().frame(maxHeight: .infinity)
         case .failed(let m):
             ColumnError(message: m).frame(maxHeight: .infinity)
         case .loaded:
-            list(entries: sortedEntries)
+            HStack(alignment: .top, spacing: 16) {
+                list(entries: sortedEntries)
+                if showRail {
+                    letterRail
+                }
+            }
         }
     }
 
@@ -117,21 +172,60 @@ struct BrowseView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .onChange(of: focusedName) { _, new in
-                    guard let new else { return }
+                .onChange(of: focusedKey) { _, new in
+                    guard case .entry(let name) = new else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(new, anchor: .center)
+                        proxy.scrollTo(name, anchor: .center)
                     }
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .background(DuplexColor.panel)
         .clipShape(RoundedRectangle(cornerRadius: DuplexMetric.panelRadius))
     }
 
+    private var letterRail: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(DuplexColor.border).frame(height: 1)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(availableLetters, id: \.self) { letter in
+                            letterRow(letter)
+                                .id(BrowseFocus.letter(letter))
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+                .onChange(of: focusedKey) { _, new in
+                    guard case .letter = new else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(new!, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(width: 72)
+        .background(DuplexColor.panel)
+        .clipShape(RoundedRectangle(cornerRadius: DuplexMetric.panelRadius))
+    }
+
+    private func letterRow(_ letter: String) -> some View {
+        let isFocused = focusedKey == .letter(letter)
+        return Text(letter)
+            .font(.system(size: 22, weight: isFocused ? .heavy : .semibold).monospacedDigit())
+            .foregroundStyle(isFocused ? DuplexColor.bg : DuplexColor.muted)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(isFocused ? DuplexColor.accent : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 8)
+            .animation(.easeOut(duration: 0.12), value: isFocused)
+    }
+
     @ViewBuilder
     private func row(for entry: Entry) -> some View {
-        let isFocused = focusedName == entry.name
+        let isFocused = focusedKey == .entry(entry.name)
         switch entry {
         case .dir(let name, let children, let mtime):
             GridEntryRow(
@@ -156,12 +250,24 @@ struct BrowseView: View {
         }
     }
 
-    private func handleActivate(_ name: String) {
-        guard let entry = sortedEntries.first(where: { $0.name == name }) else { return }
-        lastSel.set(dir: dirPath, child: name)
-        switch entry {
-        case .dir:  nav.push(.browse(path: subpath(name)))
-        case .file: nav.push(.player(vpath: subpath(name)))
+    // MARK: - actions
+
+    private func handleActivate(_ key: BrowseFocus) {
+        switch key {
+        case .entry(let name):
+            guard let entry = sortedEntries.first(where: { $0.name == name }) else { return }
+            lastSel.set(dir: dirPath, child: name)
+            switch entry {
+            case .dir:  nav.push(.browse(path: subpath(name)))
+            case .file: nav.push(.player(vpath: subpath(name)))
+            }
+        case .letter(let letter):
+            // Jump to (and put focus back on) the first entry that lives under
+            // this letter. The list's `onChange(of: focusedKey)` scrolls the
+            // matched row to center.
+            if let target = sortedEntries.first(where: { firstLetter(of: $0.name) == letter }) {
+                focusedKey = .entry(target.name)
+            }
         }
     }
 
@@ -170,9 +276,9 @@ struct BrowseView: View {
         guard !names.isEmpty else { return }
         if didApplyInitialFocus { return }
         if let remembered = lastSel.get(dir: dirPath), names.contains(remembered) {
-            focusedName = remembered
+            focusedKey = .entry(remembered)
         } else {
-            focusedName = names.first
+            focusedKey = .entry(names.first!)
         }
         didApplyInitialFocus = true
     }
