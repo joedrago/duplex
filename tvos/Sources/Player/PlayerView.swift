@@ -35,6 +35,11 @@ struct PlayerView: View {
     private let client = DuplexClient()
     private let baseSeekStep = 10
 
+    private var isPlayingState: Bool {
+        if case .playing = session.state { return true }
+        return false
+    }
+
     var body: some View {
         ZStack {
             DuplexColor.bg.ignoresSafeArea()
@@ -76,7 +81,10 @@ struct PlayerView: View {
             // picker overlay is up — the picker's SwiftUI Buttons handle
             // input via the normal focus engine.
             PlayerRemoteInput(
-                isActive: !pickerOpen,
+                // Only intercept presses on the live player surface — leaving
+                // it active during .ended would steal focus from the
+                // EndOfVideoCard buttons (Continue / Done).
+                isActive: !pickerOpen && isPlayingState,
                 onLeftBegan: { startScrub(.backward) },
                 onLeftEnded: { endScrub() },
                 onRightBegan: { startScrub(.forward) },

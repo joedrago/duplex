@@ -79,6 +79,7 @@ struct HomeView: View {
             footerHint
         }
         .background(DuplexColor.bg.ignoresSafeArea())
+        .ignoresSafeArea()
         .navigationBarHidden(true)
         .task {
             await vm.load()
@@ -89,8 +90,11 @@ struct HomeView: View {
 
     // MARK: focus topology
 
-    private var sortedLibraries: [Entry] {
-        if case .loaded(let entries) = vm.libraries { return sortEntries(entries) }
+    /// Libraries always display in the server's configured order — they are not
+    /// re-sorted by the user's sort preference (which still governs sub-folder
+    /// listings in BrowseView and the badge on the footer hint).
+    private var libraryEntries: [Entry] {
+        if case .loaded(let entries) = vm.libraries { return entries }
         return []
     }
 
@@ -106,7 +110,7 @@ struct HomeView: View {
     /// Drives `WrapColumns`. Order here matches the visual HStack so left/right
     /// arrows cross between adjacent columns naturally.
     private var focusColumns: [[HomeFocus]] {
-        let libKeys: [HomeFocus] = sortedLibraries.map { .library($0.name) } + [.settings]
+        let libKeys: [HomeFocus] = libraryEntries.map { .library($0.name) } + [.settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
         let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
         return [libKeys, recKeys, conKeys]
@@ -117,7 +121,7 @@ struct HomeView: View {
     private func handleActivate(_ key: HomeFocus) {
         switch key {
         case .library(let name):
-            if let entry = sortedLibraries.first(where: { $0.name == name }) {
+            if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
                 case .dir(let n, _, _):           nav.push(.browse(path: n))
                 case .file(let n, _, _, _, _):    nav.push(.player(vpath: n))
@@ -147,7 +151,7 @@ struct HomeView: View {
             focus = .continueWatching(first.vpath)
         } else if let first = recentItems.first {
             focus = .recent(first.id)
-        } else if let first = sortedLibraries.first {
+        } else if let first = libraryEntries.first {
             focus = .library(first.name)
         }
     }
@@ -166,7 +170,7 @@ struct HomeView: View {
             didSetInitialFocus = true
             return
         }
-        if let first = sortedLibraries.first {
+        if let first = libraryEntries.first {
             focus = .library(first.name)
             didSetInitialFocus = true
         }
@@ -177,7 +181,6 @@ struct HomeView: View {
     private var librariesColumn: some View {
         Column(
             title: "Libraries",
-            badge: sort.mode.label,
             scrollAnchor: anchorFor(columnIndex: 0)
         ) {
             switch vm.libraries {
@@ -186,7 +189,7 @@ struct HomeView: View {
             case .failed(let m):
                 ColumnError(message: m)
             case .loaded:
-                let entries = sortedLibraries
+                let entries = libraryEntries
                 if entries.isEmpty {
                     EmptyColumn(icon: "📭", title: "No libraries", hint: "Start the server with one or more --library paths.")
                 } else {

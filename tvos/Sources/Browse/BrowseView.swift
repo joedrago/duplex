@@ -49,6 +49,7 @@ struct BrowseView: View {
             footerHint
         }
         .background(DuplexColor.bg.ignoresSafeArea())
+        .ignoresSafeArea()
         .navigationBarHidden(true)
         .task {
             await vm.load(path: dirPath)
