@@ -46,6 +46,12 @@ struct BrowseView: View {
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
 
+    // Remembered entry name from the last time the list (not the rail) had focus.
+    // Lets `crossNavigate` send Rail → List back to where the user was reading,
+    // instead of WrapColumns' same-row-index default which would land them on
+    // some arbitrary entry whose ordinal happens to match the focused letter.
+    @State private var lastEntryFocus: String?
+
     var body: some View {
         VStack(spacing: 0) {
             BrowseHeader(crumbPath: dirPath)
@@ -54,7 +60,8 @@ struct BrowseView: View {
                 current: $focusedKey,
                 onActivate: handleActivate,
                 onPlayPause: { sort.toggle() },
-                onMenuTap: { nav.path.removeLast() }
+                onMenuTap: { nav.path.removeLast() },
+                crossNavigate: crossNavigate
             ) {
                 contentRow
                     .padding(.horizontal, 40)
@@ -87,6 +94,9 @@ struct BrowseView: View {
             if let first = sortedEntryNames.first {
                 focusedKey = .entry(first)
             }
+        }
+        .onChange(of: focusedKey) { _, new in
+            if case .entry(let name) = new { lastEntryFocus = name }
         }
     }
 
@@ -251,6 +261,28 @@ struct BrowseView: View {
     }
 
     // MARK: - actions
+
+    /// Override left/right cross-column behavior so the list↔rail jump means
+    /// what the user intends instead of WrapColumns' same-row-index default:
+    ///
+    /// - List → Rail: land on the rail letter that matches the focused entry's
+    ///   first letter, so the user starts navigating the rail from "where they
+    ///   already are" alphabetically.
+    /// - Rail → List: land back on whichever entry the list last focused
+    ///   (tracked in `lastEntryFocus`), so the rail acts as a scratchpad
+    ///   without yanking the list cursor to some unrelated row.
+    private func crossNavigate(_ current: BrowseFocus, _ dir: WrapColumnsCrossDirection) -> BrowseFocus? {
+        switch (current, dir) {
+        case (.entry(let name), .right):
+            let letter = firstLetter(of: name)
+            return availableLetters.contains(letter) ? .letter(letter) : nil
+        case (.letter, .left):
+            guard let name = lastEntryFocus, sortedEntryNames.contains(name) else { return nil }
+            return .entry(name)
+        default:
+            return nil
+        }
+    }
 
     private func handleActivate(_ key: BrowseFocus) {
         switch key {

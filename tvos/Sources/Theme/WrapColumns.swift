@@ -1,12 +1,19 @@
 import SwiftUI
 
+/// Direction passed to `WrapColumns.crossNavigate`. Top-level rather than
+/// nested inside the generic struct so callers can write the closure type
+/// without binding to a specific `WrapColumns` specialization.
+enum WrapColumnsCrossDirection { case left, right }
+
 /// Reusable multi-column focus grid for tvOS.
 ///
 /// - Up / Down wrap inside a column (top → bottom, bottom → top) on a tap.
 ///   When the arrow is held long enough to trigger auto-repeat scrolling,
 ///   movement clamps at the ends instead of wrapping.
 /// - Left / Right move to the same row index in the sibling column (clamped
-///   to the peer's last row if shorter).
+///   to the peer's last row if shorter). When the same-row default makes no
+///   semantic sense (e.g. crossing between a name list and an alphabet rail),
+///   the caller can override with `crossNavigate`.
 /// - Select fires `onActivate(currentKey)`.
 /// - Hold-Select (~0.55s) fires `onLongSelect(currentKey)` if bound.
 /// - Play/Pause / Menu-tap / Menu-hold fire their respective optional
@@ -31,6 +38,14 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
     var onPlayPause:   (() -> Void)? = nil
     var onMenuTap:     (() -> Void)? = nil
     var onMenuHold:    (() -> Void)? = nil
+
+    /// Caller-supplied override for left/right cross-column navigation. Invoked
+    /// with the currently focused key and the direction the user pressed. Return
+    /// the key to focus on the peer column, or nil to fall back to the default
+    /// same-row mapping. The returned key must exist in `columns`, else the
+    /// default mapping is used.
+    var crossNavigate: ((Key, WrapColumnsCrossDirection) -> Key?)? = nil
+
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -83,10 +98,16 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
                 current = col[rowIdx + 1]
             }
         case .left:
-            current = peerKey(rowIdx: rowIdx, col: colIdx - 1) ?? cur
+            current = crossOverride(from: cur, .left) ?? peerKey(rowIdx: rowIdx, col: colIdx - 1) ?? cur
         case .right:
-            current = peerKey(rowIdx: rowIdx, col: colIdx + 1) ?? cur
+            current = crossOverride(from: cur, .right) ?? peerKey(rowIdx: rowIdx, col: colIdx + 1) ?? cur
         }
+    }
+
+    private func crossOverride(from cur: Key, _ dir: WrapColumnsCrossDirection) -> Key? {
+        guard let candidate = crossNavigate?(cur, dir),
+              columns.contains(where: { $0.contains(candidate) }) else { return nil }
+        return candidate
     }
 
     private func peerKey(rowIdx: Int, col idx: Int) -> Key? {
