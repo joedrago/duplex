@@ -8,10 +8,8 @@ struct BrowseHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 24) {
-            Button { nav.popToRoot() } label: {
-                DuplexLogo(size: 40)
-            }
-            .buttonStyle(.plain)
+            DuplexLogo(size: 40)
+                .focusable(false)
 
             if let crumbPath, !crumbPath.isEmpty {
                 BreadcrumbBar(path: crumbPath)
