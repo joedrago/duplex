@@ -51,7 +51,12 @@ enum NavDestination: Hashable {
         case .browse(let path):
             BrowseView(dirPath: path)
         case .player(let vpath):
-            PlayerView(vpath: vpath)
+            // .id(vpath) so that hopping from .player(A) directly to .player(B)
+            // (Continue/Done flow) tears down PlayerView A entirely and builds
+            // a fresh one for B — otherwise SwiftUI reuses the same view
+            // identity, the @StateObject PlayerSession carries over (already
+            // .ended), and the underlying VLCMediaPlayer keeps showing A.
+            PlayerView(vpath: vpath).id(vpath)
         case .settings:
             SettingsView()
         }

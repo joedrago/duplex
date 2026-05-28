@@ -53,11 +53,18 @@ struct PlayerView: View {
                     nextName: session.nextEntry?.name,
                     onContinue: {
                         if let next = session.nextEntry {
+                            NSLog("[Duplex/Player] Continue pressed: from=%@ → name=%@ vpath=%@",
+                                  vpath, next.name, next.vpath)
                             nav.path.removeLast()
                             nav.push(.player(vpath: next.vpath))
+                        } else {
+                            NSLog("[Duplex/Player] Continue pressed but nextEntry is nil; vpath=%@", vpath)
                         }
                     },
-                    onDone: { nav.path.removeLast() }
+                    onDone: {
+                        NSLog("[Duplex/Player] Done pressed; vpath=%@", vpath)
+                        nav.path.removeLast()
+                    }
                 )
             case .failed(let reason):
                 PlayerErrorCard(icon: "⚠️", title: "Couldn't play this file", detail: reason)
@@ -124,7 +131,18 @@ struct PlayerView: View {
                 }
                 .onSecondsUpdated { duration, info in
                     let totalSec = info.length / 1000
-                    let posSec = Int(duration.components.seconds)
+                    let timeSec = Int(duration.components.seconds)
+                    // Observed on tvOS: `player.time` (which Duration is derived
+                    // from here) is stuck at 0 for some HTTP-streamed mp4s even
+                    // though playback advances. `info.position` (Float 0..1 from
+                    // VLCKit) tracks correctly, so prefer it whenever we have a
+                    // known media length.
+                    let posSec: Int
+                    if totalSec > 0 && info.position > 0 {
+                        posSec = Int((Double(info.position) * Double(totalSec)).rounded())
+                    } else {
+                        posSec = timeSec
+                    }
                     Task { @MainActor in
                         session.handleTick(positionSeconds: posSec, totalSeconds: totalSec, info: info, vpath: vpath)
                     }
@@ -498,15 +516,22 @@ final class PlayerSession: ObservableObject {
     private var attachedNowPlaying = false
 
     func makeConfiguration(client: DuplexClient, vpath: String) -> VLCVideoPlayer.Configuration {
-        var cfg = VLCVideoPlayer.Configuration(url: client.rawURL(path: vpath))
+        let raw = client.rawURL(path: vpath)
+        var cfg = VLCVideoPlayer.Configuration(url: raw)
         cfg.autoPlay = true
         return cfg
     }
 
     func start(client: DuplexClient, vpath: String) async {
         guard case .idle = state else { return }
+        NSLog("[Duplex/Player] start vpath=%@", vpath)
         state = .loading
         let next: NextResponse? = (try? await client.next(path: vpath)) ?? nil
+        if let next {
+            NSLog("[Duplex/Player] /api/next for=%@ → name=%@ vpath=%@", vpath, next.name, next.vpath)
+        } else {
+            NSLog("[Duplex/Player] /api/next for=%@ → none", vpath)
+        }
         state = .playing
         self.nextEntry = next
     }
@@ -550,6 +575,8 @@ final class PlayerSession: ObservableObject {
         case .stopped:
             isPlaying = false
         case .ended:
+            NSLog("[Duplex/Player] state=ended vpath=%@ nextEntryVpath=%@",
+                  vpath, nextEntry?.vpath ?? "(nil)")
             isPlaying = false
             ResumeStore.shared.remove(vpath)
             self.state = .ended
@@ -561,6 +588,10 @@ final class PlayerSession: ObservableObject {
     }
 
     func handleTick(positionSeconds: Int, totalSeconds: Int, info: VLCVideoPlayer.PlaybackInformation, vpath: String) {
+        if positionSeconds != self.positionSeconds || totalSeconds != self.durationSeconds {
+            NSLog("[Duplex/Player/T] tick pos=%ds dur=%ds infoPos=%.3f",
+                  positionSeconds, totalSeconds, Double(info.position))
+        }
         self.positionSeconds = positionSeconds
         self.durationSeconds = totalSeconds
         ingestTracks(info: info)
