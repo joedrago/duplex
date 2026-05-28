@@ -171,12 +171,14 @@ struct PlayerView: View {
                     onSelectSubtitle: { idx in
                         proxy.setSubtitleTrack(.absolute(idx))
                         session.currentSubtitleTrackIndex = idx
+                        TrackPrefsStore.shared.setSubtitle(vpath: vpath, index: idx)
                         pickerOpen = false
                         bumpOSD()
                     },
                     onSelectAudio: { idx in
                         proxy.setAudioTrack(.absolute(idx))
                         session.currentAudioTrackIndex = idx
+                        TrackPrefsStore.shared.setAudio(vpath: vpath, index: idx)
                         pickerOpen = false
                         bumpOSD()
                     },
@@ -561,7 +563,7 @@ final class PlayerSession: ObservableObject {
         case .playing:
             isPlaying = true
             attachNowPlayingIfNeeded(proxy: proxy, vpath: vpath)
-            applyDefaultsIfNeeded(info: info, proxy: proxy)
+            applyDefaultsIfNeeded(info: info, proxy: proxy, vpath: vpath)
             if !didSeekToResume, let entry = ResumeStore.shared.get(vpath), entry.pos > 5 {
                 didSeekToResume = true
                 if #available(tvOS 16.0, *) {
@@ -628,21 +630,35 @@ final class PlayerSession: ObservableObject {
         }
     }
 
-    /// Apply our default audio + subtitle preferences once, after the first
-    /// .playing event. Subs default to off; audio defaults to the first
-    /// English-language track if we can detect one, otherwise leave VLC's
-    /// default selection alone.
-    private func applyDefaultsIfNeeded(info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy) {
+    /// Apply audio + subtitle preferences once, after the first .playing event.
+    /// Per-video saved choices (TrackPrefsStore) win over defaults. Defaults:
+    /// subs off, audio defaults to the first English-language track if we can
+    /// detect one, otherwise leave VLC's default selection alone.
+    private func applyDefaultsIfNeeded(info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy, vpath: String) {
         guard !didApplyDefaults else { return }
         didApplyDefaults = true
 
-        // 1. Subs off.
-        proxy.setSubtitleTrack(.absolute(-1))
-        currentSubtitleTrackIndex = -1
-
-        // 2. English audio if available.
+        let saved = TrackPrefsStore.shared.get(vpath)
         let realAudio = info.audioTracks.filter { isRealTrack($0) }
-        if let english = realAudio.first(where: { titleHintsEnglish($0.title) }) {
+        let realSubs  = info.subtitleTracks.filter { isRealTrack($0) }
+
+        // 1. Subtitle: saved pref wins (incl. explicit -1 / "Off"); otherwise off.
+        if let savedSub = saved?.sub,
+           savedSub == -1 || realSubs.contains(where: { $0.index == savedSub }) {
+            proxy.setSubtitleTrack(.absolute(savedSub))
+            currentSubtitleTrackIndex = savedSub
+        } else {
+            proxy.setSubtitleTrack(.absolute(-1))
+            currentSubtitleTrackIndex = -1
+        }
+
+        // 2. Audio: saved pref wins; otherwise prefer first English-language
+        // track; otherwise leave VLC's default alone.
+        if let savedAudio = saved?.audio,
+           realAudio.contains(where: { $0.index == savedAudio }) {
+            proxy.setAudioTrack(.absolute(savedAudio))
+            currentAudioTrackIndex = savedAudio
+        } else if let english = realAudio.first(where: { titleHintsEnglish($0.title) }) {
             proxy.setAudioTrack(.absolute(english.index))
             currentAudioTrackIndex = english.index
         }

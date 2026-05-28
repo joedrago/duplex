@@ -12,6 +12,11 @@ final class BrowseViewModel: ObservableObject {
     private let client = DuplexClient()
 
     func load(path: String) async {
+        // Pop-back re-fires `.task`, which would otherwise reset our state to
+        // .loading and momentarily empty the list — that briefly empties the
+        // WrapColumns columns, which clears the focused row, which then resnaps
+        // to the top of the list after data lands. Skip if we already have it.
+        if case .loaded = state { return }
         state = .loading
         do {
             let resp = try await client.browse(path: path)
@@ -55,7 +60,25 @@ struct BrowseView: View {
             await vm.load(path: dirPath)
             applyInitialFocusIfNeeded()
         }
+        .onAppear {
+            // Fires on every pop-back from a child route. Re-apply lastSel so
+            // the row the user activated stays highlighted when they return.
+            // (On the very first load this fires before data lands, so it
+            // no-ops and the .task → applyInitialFocusIfNeeded path handles it.)
+            if let remembered = lastSel.get(dir: dirPath),
+               sortedEntryNames.contains(remembered) {
+                focusedName = remembered
+            }
+        }
         .onChange(of: sortedEntryNames) { _, _ in applyInitialFocusIfNeeded() }
+        .onChange(of: sort.mode) { _, _ in
+            // Sort toggle reshuffles the list — snap focus to the top of the
+            // new ordering rather than leaving the user mid-list at a row
+            // whose neighbors have changed underneath them.
+            if let first = sortedEntryNames.first {
+                focusedName = first
+            }
+        }
     }
 
     private var sortedEntries: [Entry] {

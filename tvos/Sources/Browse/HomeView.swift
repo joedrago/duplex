@@ -21,6 +21,8 @@ final class HomeViewModel: ObservableObject {
     }
 
     private func loadLibraries() async {
+        // Skip on pop-back to Home — see BrowseViewModel.load for rationale.
+        if case .loaded = libraries { return }
         libraries = .loading
         do {
             let resp = try await client.browse(path: "")
@@ -31,6 +33,7 @@ final class HomeViewModel: ObservableObject {
     }
 
     private func loadRecent() async {
+        if case .loaded = recent { return }
         recent = .loading
         do {
             let resp = try await client.recent(limit: 30)
@@ -54,6 +57,7 @@ struct HomeView: View {
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var resume = ResumeStore.shared
     @ObservedObject private var sort = SortPreference.shared
+    @ObservedObject private var lastSel = LastSelectionStore.shared
 
     @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
@@ -85,7 +89,15 @@ struct HomeView: View {
             await vm.load()
             applyInitialFocusIfNeeded()
         }
-        .onAppear { applyInitialFocusIfNeeded() }
+        .onAppear {
+            if !didSetInitialFocus {
+                applyInitialFocusIfNeeded()
+            } else if let lastName = lastSel.get(dir: ""),
+                      libraryEntries.contains(where: { $0.name == lastName }) {
+                // Pop-back from a library route — land on the same row.
+                focus = .library(lastName)
+            }
+        }
     }
 
     // MARK: focus topology
@@ -122,6 +134,10 @@ struct HomeView: View {
         switch key {
         case .library(let name):
             if let entry = libraryEntries.first(where: { $0.name == name }) {
+                // Remember which library was entered so pop-back to Home lands
+                // focus on the same row. Stored under the empty-string dir key,
+                // which is the virtual root that holds libraries.
+                lastSel.set(dir: "", child: name)
                 switch entry {
                 case .dir(let n, _, _):           nav.push(.browse(path: n))
                 case .file(let n, _, _, _, _):    nav.push(.player(vpath: n))
