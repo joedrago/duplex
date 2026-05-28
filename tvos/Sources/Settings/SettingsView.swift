@@ -2,13 +2,12 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var resume = ResumeStore.shared
-    @ObservedObject private var lastSel = LastSelectionStore.shared
     @State private var serverOverride: String = ""
     @State private var confirmForget: ConfirmTarget?
 
     private enum ConfirmTarget: Identifiable {
-        case resumes, selections
-        var id: Int { self == .resumes ? 0 : 1 }
+        case resumes
+        var id: Int { 0 }
     }
 
     var body: some View {
@@ -32,14 +31,6 @@ struct SettingsView: View {
                             .disabled(resume.count == 0)
                     }
 
-                    settingRow(
-                        title: "Remembered selections",
-                        status: "\(lastSel.count) directories"
-                    ) {
-                        Button("Forget all") { confirmForget = .selections }
-                            .disabled(lastSel.count == 0)
-                    }
-
                     serverURLRow
                 }
                 .padding(.horizontal, 40)
@@ -59,11 +50,6 @@ struct SettingsView: View {
                 return Alert(
                     title: Text("Forget all \(resume.count) resume positions?"),
                     primaryButton: .destructive(Text("Forget all")) { resume.forgetAll() },
-                    secondaryButton: .cancel())
-            case .selections:
-                return Alert(
-                    title: Text("Forget remembered selection in \(lastSel.count) directories?"),
-                    primaryButton: .destructive(Text("Forget all")) { lastSel.forgetAll() },
                     secondaryButton: .cancel())
             }
         }

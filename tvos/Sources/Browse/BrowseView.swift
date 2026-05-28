@@ -41,7 +41,6 @@ struct BrowseView: View {
 
     @StateObject private var vm = BrowseViewModel()
     @ObservedObject private var sort = SortPreference.shared
-    @ObservedObject private var lastSel = LastSelectionStore.shared
     @EnvironmentObject private var nav: NavCoordinator
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
@@ -75,16 +74,6 @@ struct BrowseView: View {
         .task {
             await vm.load(path: dirPath)
             applyInitialFocusIfNeeded()
-        }
-        .onAppear {
-            // Fires on every pop-back from a child route. Re-apply lastSel so
-            // the row the user activated stays highlighted when they return.
-            // (On the very first load this fires before data lands, so it
-            // no-ops and the .task → applyInitialFocusIfNeeded path handles it.)
-            if let remembered = lastSel.get(dir: dirPath),
-               sortedEntryNames.contains(remembered) {
-                focusedKey = .entry(remembered)
-            }
         }
         .onChange(of: sortedEntryNames) { _, _ in applyInitialFocusIfNeeded() }
         .onChange(of: sort.mode) { _, _ in
@@ -288,7 +277,6 @@ struct BrowseView: View {
         switch key {
         case .entry(let name):
             guard let entry = sortedEntries.first(where: { $0.name == name }) else { return }
-            lastSel.set(dir: dirPath, child: name)
             switch entry {
             case .dir:  nav.push(.browse(path: subpath(name)))
             case .file: nav.push(.player(vpath: subpath(name)))
@@ -307,11 +295,7 @@ struct BrowseView: View {
         let names = sortedEntryNames
         guard !names.isEmpty else { return }
         if didApplyInitialFocus { return }
-        if let remembered = lastSel.get(dir: dirPath), names.contains(remembered) {
-            focusedKey = .entry(remembered)
-        } else {
-            focusedKey = .entry(names.first!)
-        }
+        focusedKey = .entry(names.first!)
         didApplyInitialFocus = true
     }
 
