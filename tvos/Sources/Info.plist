@@ -16,8 +16,8 @@
 	<string>APPL</string>
 	<key>UILaunchStoryboardName</key>
 	<string></string>
-	<key>WebViewURL</key>
-	<string>$(WEBVIEW_URL)</string>
+	<key>ServerURL</key>
+	<string>$(SERVER_URL)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

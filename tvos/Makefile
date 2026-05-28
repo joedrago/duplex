@@ -1,4 +1,7 @@
-WEBVIEW_URL ?= http://localhost:2345
+# Backward-compat: accept WEBVIEW_URL as an alias for SERVER_URL so the old
+# `make run … WEBVIEW_URL=…` invocations still work.
+SERVER_URL ?= $(WEBVIEW_URL)
+SERVER_URL ?= http://localhost:2345
 DEVELOPMENT_TEAM ?= $(shell security find-certificate -c "Apple Development" -p 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed -n 's/.*OU=\([A-Z0-9]*\).*/\1/p')
 
 PROJECT = Duplex.xcodeproj
@@ -8,7 +11,7 @@ SCHEME = Duplex
 
 generate: $(PROJECT)
 
-$(PROJECT): project.yml Sources/Info.plist Sources/AppDelegate.swift Sources/WebViewController.swift Sources/TVWebView.h Sources/TVWebView.m Sources/BridgingHeader.h
+$(PROJECT): project.yml $(shell find Sources -type f \( -name '*.swift' -o -name '*.plist' -o -name '*.h' -o -name '*.m' \) 2>/dev/null)
 	xcodegen generate
 
 build: generate
@@ -18,7 +21,7 @@ build: generate
 		-sdk appletvos \
 		-configuration Release \
 		-destination 'generic/platform=tvOS' \
-		WEBVIEW_URL='$(WEBVIEW_URL)' \
+		SERVER_URL='$(SERVER_URL)' \
 		DEVELOPMENT_TEAM='$(DEVELOPMENT_TEAM)' \
 		-allowProvisioningUpdates \
 		build
@@ -29,7 +32,7 @@ simulator: generate
 		-scheme $(SCHEME) \
 		-sdk appletvsimulator \
 		-destination 'platform=tvOS Simulator,name=Apple TV' \
-		WEBVIEW_URL='$(WEBVIEW_URL)' \
+		SERVER_URL='$(SERVER_URL)' \
 		build
 
 install: build

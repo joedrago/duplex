@@ -6,15 +6,18 @@
 make clean && make install \
     DEVELOPMENT_TEAM=<TEAM_ID> \
     DEVICE_ID=<DEVICE_UUID> \
-    WEBVIEW_URL=http://<host>:2345
+    SERVER_URL=http://<host>:2345
 ```
 
 `DEVELOPMENT_TEAM` is optional — when omitted, the Makefile auto-detects it from
 your `Apple Development` certificate. `DEVICE_ID` is required if you have more
-than one Apple TV paired (otherwise the first one is used). `WEBVIEW_URL`
+than one Apple TV paired (otherwise the first one is used). `SERVER_URL`
 defaults to `http://localhost:2345`; set it to the host running the duplex
 server (usually not `localhost`, since the Apple TV needs to reach it over the
 network).
+
+> The old `WEBVIEW_URL=…` name is still accepted as a backward-compat alias if
+> you have it in your shell history.
 
 ### Finding `DEVICE_ID`
 
