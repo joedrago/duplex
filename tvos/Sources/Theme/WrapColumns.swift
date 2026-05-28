@@ -2,7 +2,9 @@ import SwiftUI
 
 /// Reusable multi-column focus grid for tvOS.
 ///
-/// - Up / Down wrap inside a column (top → bottom, bottom → top).
+/// - Up / Down wrap inside a column (top → bottom, bottom → top) on a tap.
+///   When the arrow is held long enough to trigger auto-repeat scrolling,
+///   movement clamps at the ends instead of wrapping.
 /// - Left / Right move to the same row index in the sibling column (clamped
 ///   to the peer's last row if shorter).
 /// - Select fires `onActivate(currentKey)`.
@@ -38,8 +40,8 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
                     isActive: isActive,
                     onLeft:       { move(.left) },
                     onRight:      { move(.right) },
-                    onUp:         { move(.up) },
-                    onDown:       { move(.down) },
+                    onUp:         { isAutoRepeat in move(.up, wrap: !isAutoRepeat) },
+                    onDown:       { isAutoRepeat in move(.down, wrap: !isAutoRepeat) },
                     onSelect:     { if let k = current { onActivate(k) } },
                     onLongSelect: { if let k = current, let cb = onLongSelect { cb(k) } },
                     onPlayPause:  onPlayPause,
@@ -58,7 +60,7 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
         current = columns.first(where: { !$0.isEmpty })?.first
     }
 
-    private func move(_ dir: Dir) {
+    private func move(_ dir: Dir, wrap: Bool = true) {
         guard !columns.isEmpty else { return }
         guard let cur = current,
               let colIdx = columns.firstIndex(where: { $0.contains(cur) }),
@@ -69,9 +71,17 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
         let col = columns[colIdx]
         switch dir {
         case .up:
-            current = rowIdx == 0 ? col.last : col[rowIdx - 1]
+            if rowIdx == 0 {
+                current = wrap ? col.last : cur
+            } else {
+                current = col[rowIdx - 1]
+            }
         case .down:
-            current = rowIdx == col.count - 1 ? col.first : col[rowIdx + 1]
+            if rowIdx == col.count - 1 {
+                current = wrap ? col.first : cur
+            } else {
+                current = col[rowIdx + 1]
+            }
         case .left:
             current = peerKey(rowIdx: rowIdx, col: colIdx - 1) ?? cur
         case .right:

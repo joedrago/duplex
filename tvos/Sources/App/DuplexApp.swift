@@ -6,6 +6,11 @@ struct DuplexApp: App {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         NSLog("[Duplex] launched v%@ build %@  server=%@", v, b, AppConfig.serverURL.absoluteString)
+        let home = NSHomeDirectory()
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "?"
+        let resumeBytes = UserDefaults.standard.data(forKey: "duplex.resume")?.count ?? 0
+        let resumeCount = ResumeStore.shared.allRaw.count
+        NSLog("[Duplex/Container] home=%@ docs=%@ resumeBytes=%d resumeCount=%d", home, docs, resumeBytes, resumeCount)
     }
 
     var body: some Scene {

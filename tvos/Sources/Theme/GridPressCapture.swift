@@ -16,8 +16,8 @@ struct GridPressCapture: UIViewControllerRepresentable {
     let isActive: Bool
     var onLeft:        () -> Void = {}
     var onRight:       () -> Void = {}
-    var onUp:          () -> Void = {}
-    var onDown:        () -> Void = {}
+    var onUp:          (_ isAutoRepeat: Bool) -> Void = { _ in }
+    var onDown:        (_ isAutoRepeat: Bool) -> Void = { _ in }
     var onSelect:      () -> Void = {}
     var onLongSelect:  () -> Void = {}
     var onPlayPause:   (() -> Void)? = nil
@@ -54,8 +54,8 @@ final class GridPressCaptureVC: UIViewController {
     var isActiveForFocus: Bool = true
     var onLeft:        () -> Void = {}
     var onRight:       () -> Void = {}
-    var onUp:          () -> Void = {}
-    var onDown:        () -> Void = {}
+    var onUp:          (_ isAutoRepeat: Bool) -> Void = { _ in }
+    var onDown:        (_ isAutoRepeat: Bool) -> Void = { _ in }
     var onSelect:      () -> Void = {}
     var onLongSelect:  () -> Void = {}
     var onPlayPause:   (() -> Void)? = nil
@@ -198,7 +198,7 @@ final class GridPressCaptureVC: UIViewController {
         holdDir = dir
         holdStartedAt = Date()
         // Immediate single-step so a quick tap moves exactly one row.
-        fireHoldStep(dir, count: 1)
+        fireHoldStep(dir, count: 1, isAutoRepeat: false)
         // Tick frequently; the first ~0.4s of ticks deliberately produce zero
         // steps so a hold under that threshold still feels like a single tap.
         holdTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -218,7 +218,7 @@ final class GridPressCaptureVC: UIViewController {
         let elapsed = Date().timeIntervalSince(started)
         let stepsThisTick = holdStepsForElapsed(elapsed)
         if stepsThisTick > 0 {
-            fireHoldStep(dir, count: stepsThisTick)
+            fireHoldStep(dir, count: stepsThisTick, isAutoRepeat: true)
         }
     }
 
@@ -241,11 +241,11 @@ final class GridPressCaptureVC: UIViewController {
         }
     }
 
-    private func fireHoldStep(_ dir: HoldDir, count: Int) {
+    private func fireHoldStep(_ dir: HoldDir, count: Int, isAutoRepeat: Bool) {
         for _ in 0..<count {
             switch dir {
-            case .up:   onUp()
-            case .down: onDown()
+            case .up:   onUp(isAutoRepeat)
+            case .down: onDown(isAutoRepeat)
             }
         }
     }
