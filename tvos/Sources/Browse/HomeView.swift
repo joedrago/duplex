@@ -46,6 +46,7 @@ final class HomeViewModel: ObservableObject {
 
 /// Identifies a focusable row on the home screen.
 enum HomeFocus: Hashable {
+    case search
     case library(String)
     case recent(String)
     case continueWatching(String)
@@ -122,7 +123,7 @@ struct HomeView: View {
     /// Drives `WrapColumns`. Order here matches the visual HStack so left/right
     /// arrows cross between adjacent columns naturally.
     private var focusColumns: [[HomeFocus]] {
-        let libKeys: [HomeFocus] = libraryEntries.map { .library($0.name) } + [.settings]
+        let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
         let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
         return [libKeys, recKeys, conKeys]
@@ -154,6 +155,8 @@ struct HomeView: View {
             nav.push(.player(vpath: vpath))
         case .settings:
             nav.push(.settings)
+        case .search:
+            nav.push(.search)
         }
     }
 
@@ -199,6 +202,12 @@ struct HomeView: View {
             title: "Libraries",
             scrollAnchor: anchorFor(columnIndex: 0)
         ) {
+            searchRow
+                .id(HomeFocus.search)
+            Rectangle()
+                .fill(DuplexColor.border)
+                .frame(height: 1)
+                .padding(.vertical, 6)
             switch vm.libraries {
             case .idle, .loading:
                 LoadingColumn()
@@ -222,6 +231,16 @@ struct HomeView: View {
                     .id(HomeFocus.settings)
             }
         }
+    }
+
+    private var searchRow: some View {
+        GridEntryRow(
+            icon: "🔍",
+            title: "Search",
+            subtitle: nil,
+            meta: nil,
+            isFocused: focus == .search
+        )
     }
 
     @ViewBuilder

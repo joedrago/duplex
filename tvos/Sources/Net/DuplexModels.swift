@@ -121,6 +121,63 @@ enum RecentItem: Decodable, Identifiable, Hashable {
     }
 }
 
+// MARK: - Search
+
+struct SearchResponse: Decodable {
+    let items: [SearchItem]
+}
+
+/// A search hit. Shares the `RecentItem` shape on purpose so the same row
+/// rendering logic can drive both views.
+enum SearchItem: Decodable, Identifiable, Hashable {
+    case dir(name: String, vpath: String, mtime: Int64, children: Int)
+    case file(name: String, vpath: String, mtime: Int64, size: UInt64)
+
+    var id: String { vpath }
+
+    var vpath: String {
+        switch self {
+        case .dir(_, let v, _, _):  return v
+        case .file(_, let v, _, _): return v
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .dir(let n, _, _, _):  return n
+        case .file(let n, _, _, _): return n
+        }
+    }
+
+    var isDir: Bool {
+        if case .dir = self { return true }
+        return false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, name, vpath, mtime, children, size
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(String.self, forKey: .kind)
+        let name = try c.decode(String.self, forKey: .name)
+        let vpath = try c.decode(String.self, forKey: .vpath)
+        let mtime = try c.decode(Int64.self, forKey: .mtime)
+        switch kind {
+        case "dir":
+            self = .dir(name: name, vpath: vpath, mtime: mtime,
+                        children: try c.decode(Int.self, forKey: .children))
+        case "file":
+            self = .file(name: name, vpath: vpath, mtime: mtime,
+                         size: try c.decode(UInt64.self, forKey: .size))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
+                debugDescription: "unknown kind \(kind)")
+        }
+    }
+}
+
 // MARK: - Next
 
 struct NextResponse: Decodable {

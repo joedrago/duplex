@@ -50,6 +50,15 @@ struct DuplexClient {
         }
     }
 
+    /// `/api/search?q=<query>&limit=N` — case-insensitive substring search
+    /// across every entry. Empty `query` returns no results without round-
+    /// tripping to the server.
+    func search(query: String, limit: Int = 50) async throws -> SearchResponse {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return SearchResponse(items: []) }
+        return try await getJSON("/api/search", query: ["q": q, "limit": String(limit)])
+    }
+
     func rawURL(path: String) -> URL {
         url("/api/raw", query: ["path": path])
     }

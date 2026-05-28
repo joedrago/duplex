@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod next;
 pub mod raw;
 pub mod recent;
+pub mod search;
 pub mod sidecar;
 pub mod vpath;
 pub mod web;
@@ -49,6 +50,7 @@ pub fn router(state: AppState) -> Router {
         .merge(sidecar::routes())
         .merge(recent::routes())
         .merge(next::routes())
+        .merge(search::routes())
         .merge(debug::routes())
         .merge(web::routes())
         .with_state(state)

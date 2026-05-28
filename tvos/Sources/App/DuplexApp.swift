@@ -44,6 +44,7 @@ enum NavDestination: Hashable {
     case browse(path: String)
     case player(vpath: String)
     case settings
+    case search
 
     @ViewBuilder
     func makeView() -> some View {
@@ -59,6 +60,8 @@ enum NavDestination: Hashable {
             PlayerView(vpath: vpath).id(vpath)
         case .settings:
             SettingsView()
+        case .search:
+            SearchView()
         }
     }
 }
