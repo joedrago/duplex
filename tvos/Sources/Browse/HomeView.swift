@@ -41,11 +41,12 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
-/// Identifies a focusable row on the home screen. Three columns, three cases.
+/// Identifies a focusable row on the home screen.
 enum HomeFocus: Hashable {
     case library(String)
     case recent(String)
     case continueWatching(String)
+    case settings
 }
 
 struct HomeView: View {
@@ -54,19 +55,28 @@ struct HomeView: View {
     @ObservedObject private var resume = ResumeStore.shared
     @ObservedObject private var sort = SortPreference.shared
 
-    @FocusState private var focus: HomeFocus?
+    @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
 
     var body: some View {
         VStack(spacing: 0) {
-            BrowseHeader(crumbPath: nil, showSort: true, sort: sort)
-            HStack(alignment: .top, spacing: DuplexMetric.columnGap) {
-                librariesColumn
-                recentColumn
-                continueColumn
+            BrowseHeader(crumbPath: nil)
+            WrapColumns(
+                columns: focusColumns,
+                current: $focus,
+                onActivate: handleActivate,
+                onLongSelect: handleLongSelect,
+                onPlayPause: { sort.toggle() }
+            ) {
+                HStack(alignment: .top, spacing: DuplexMetric.columnGap) {
+                    librariesColumn
+                    recentColumn
+                    continueColumn
+                }
+                .padding(.horizontal, 40)
+                .padding(.bottom, 32)
             }
-            .padding(.horizontal, 40)
-            .padding(.bottom, 32)
+            footerHint
         }
         .background(DuplexColor.bg.ignoresSafeArea())
         .navigationBarHidden(true)
@@ -77,132 +87,246 @@ struct HomeView: View {
         .onAppear { applyInitialFocusIfNeeded() }
     }
 
+    // MARK: focus topology
+
+    private var sortedLibraries: [Entry] {
+        if case .loaded(let entries) = vm.libraries { return sortEntries(entries) }
+        return []
+    }
+
+    private var recentItems: [RecentItem] {
+        if case .loaded(let items) = vm.recent { return items }
+        return []
+    }
+
+    private var continueItems: [(vpath: String, entry: ResumeEntry)] {
+        resume.visible
+    }
+
+    /// Drives `WrapColumns`. Order here matches the visual HStack so left/right
+    /// arrows cross between adjacent columns naturally.
+    private var focusColumns: [[HomeFocus]] {
+        let libKeys: [HomeFocus] = sortedLibraries.map { .library($0.name) } + [.settings]
+        let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
+        let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
+        return [libKeys, recKeys, conKeys]
+    }
+
+    // MARK: actions
+
+    private func handleActivate(_ key: HomeFocus) {
+        switch key {
+        case .library(let name):
+            if let entry = sortedLibraries.first(where: { $0.name == name }) {
+                switch entry {
+                case .dir(let n, _, _):           nav.push(.browse(path: n))
+                case .file(let n, _, _, _, _):    nav.push(.player(vpath: n))
+                }
+            }
+        case .recent(let id):
+            if let item = recentItems.first(where: { $0.id == id }) {
+                switch item {
+                case .dir(_, let vpath, _, _):    nav.push(.browse(path: vpath))
+                case .file(_, let vpath, _, _):   nav.push(.player(vpath: vpath))
+                }
+            }
+        case .continueWatching(let vpath):
+            nav.push(.player(vpath: vpath))
+        case .settings:
+            nav.push(.settings)
+        }
+    }
+
+    private func handleLongSelect(_ key: HomeFocus) {
+        guard case .continueWatching(let vpath) = key else { return }
+        resume.remove(vpath)
+        // Re-land on something sensible: prefer the next Continue Watching
+        // entry, then top of Recently Added, then Libraries. Same precedence
+        // as the initial focus on first load.
+        if let first = resume.visible.first {
+            focus = .continueWatching(first.vpath)
+        } else if let first = recentItems.first {
+            focus = .recent(first.id)
+        } else if let first = sortedLibraries.first {
+            focus = .library(first.name)
+        }
+    }
+
     /// Prefer top of Continue Watching; fall back to Recently Added; fall back
-    /// to Libraries. Only fires once per appearance — subsequent re-renders
-    /// don't yank focus away from wherever the user has navigated.
+    /// to Libraries. Only fires once per appearance.
     private func applyInitialFocusIfNeeded() {
         guard !didSetInitialFocus else { return }
-        if let firstResume = resume.visible.first {
-            focus = .continueWatching(firstResume.vpath)
+        if let first = continueItems.first {
+            focus = .continueWatching(first.vpath)
             didSetInitialFocus = true
             return
         }
-        if case .loaded(let items) = vm.recent, let first = items.first {
+        if let first = recentItems.first {
             focus = .recent(first.id)
             didSetInitialFocus = true
             return
         }
-        if case .loaded(let entries) = vm.libraries {
-            let sorted = sortEntries(entries)
-            if let first = sorted.first {
-                focus = .library(first.name)
-                didSetInitialFocus = true
-            }
+        if let first = sortedLibraries.first {
+            focus = .library(first.name)
+            didSetInitialFocus = true
         }
     }
 
+    // MARK: column views
+
     private var librariesColumn: some View {
-        Column(title: "Libraries") {
+        Column(
+            title: "Libraries",
+            badge: sort.mode.label,
+            scrollAnchor: anchorFor(columnIndex: 0)
+        ) {
             switch vm.libraries {
             case .idle, .loading:
                 LoadingColumn()
             case .failed(let m):
                 ColumnError(message: m)
-            case .loaded(let entries):
-                let sorted = sortEntries(entries)
-                if sorted.isEmpty {
+            case .loaded:
+                let entries = sortedLibraries
+                if entries.isEmpty {
                     EmptyColumn(icon: "📭", title: "No libraries", hint: "Start the server with one or more --library paths.")
                 } else {
-                    ForEach(sorted, id: \.id) { entry in
-                        switch entry {
-                        case .dir(let name, let children, _):
-                            EntryRow(
-                                icon: "📁",
-                                title: name,
-                                subtitle: nil,
-                                meta: "\(children) entries"
-                            ) {
-                                nav.push(.browse(path: name))
-                            }
-                            .focused($focus, equals: .library(name))
-                        case .file(let name, _, let size, _, _):
-                            EntryRow(
-                                icon: "🎬",
-                                title: name,
-                                subtitle: nil,
-                                meta: DuplexFormat.size(size)
-                            ) {
-                                nav.push(.player(vpath: name))
-                            }
-                            .focused($focus, equals: .library(name))
-                        }
+                    ForEach(entries, id: \.id) { entry in
+                        libraryRow(entry)
+                            .id(HomeFocus.library(entry.name))
                     }
                 }
+                Rectangle()
+                    .fill(DuplexColor.border)
+                    .frame(height: 1)
+                    .padding(.vertical, 6)
+                settingsRow
+                    .id(HomeFocus.settings)
             }
         }
     }
 
+    @ViewBuilder
+    private func libraryRow(_ entry: Entry) -> some View {
+        let key = HomeFocus.library(entry.name)
+        switch entry {
+        case .dir(let name, let children, _):
+            GridEntryRow(
+                icon: "📁",
+                title: name,
+                subtitle: nil,
+                meta: "\(children) entries",
+                isFocused: focus == key
+            )
+        case .file(let name, _, let size, _, _):
+            GridEntryRow(
+                icon: "🎬",
+                title: name,
+                subtitle: nil,
+                meta: DuplexFormat.size(size),
+                isFocused: focus == key
+            )
+        }
+    }
+
+    private var settingsRow: some View {
+        GridEntryRow(
+            icon: "⚙",
+            title: "Settings",
+            subtitle: nil,
+            meta: nil,
+            isFocused: focus == .settings
+        )
+    }
+
     private var recentColumn: some View {
-        Column(title: "Recently Added") {
+        Column(title: "Recently Added", scrollAnchor: anchorFor(columnIndex: 1)) {
             switch vm.recent {
             case .idle, .loading:
                 LoadingColumn()
             case .failed:
                 EmptyColumn(icon: "💤", title: "Nothing new", hint: "")
-            case .loaded(let items):
+            case .loaded:
+                let items = recentItems
                 if items.isEmpty {
                     EmptyColumn(icon: "💤", title: "Nothing new", hint: "")
                 } else {
                     ForEach(items, id: \.id) { item in
-                        let parent = DuplexFormat.parent(of: item.vpath)
-                        switch item {
-                        case .dir(let name, let vpath, let mtime, let children):
-                            EntryRow(
-                                icon: "📁",
-                                title: name,
-                                subtitle: parent,
-                                meta: "\(children) · \(DuplexFormat.relative(mtime))"
-                            ) {
-                                nav.push(.browse(path: vpath))
-                            }
-                            .focused($focus, equals: .recent(vpath))
-                        case .file(let name, let vpath, let mtime, let size):
-                            EntryRow(
-                                icon: "🎬",
-                                title: name,
-                                subtitle: parent,
-                                meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))"
-                            ) {
-                                nav.push(.player(vpath: vpath))
-                            }
-                            .focused($focus, equals: .recent(vpath))
-                        }
+                        recentRow(item)
+                            .id(HomeFocus.recent(item.id))
                     }
                 }
             }
         }
     }
 
+    @ViewBuilder
+    private func recentRow(_ item: RecentItem) -> some View {
+        let parent = DuplexFormat.parent(of: item.vpath)
+        let key = HomeFocus.recent(item.id)
+        switch item {
+        case .dir(let name, _, let mtime, let children):
+            GridEntryRow(
+                icon: "📁",
+                title: name,
+                subtitle: parent,
+                meta: "\(children) · \(DuplexFormat.relative(mtime))",
+                isFocused: focus == key
+            )
+        case .file(let name, _, let mtime, let size):
+            GridEntryRow(
+                icon: "🎬",
+                title: name,
+                subtitle: parent,
+                meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))",
+                isFocused: focus == key
+            )
+        }
+    }
+
     private var continueColumn: some View {
-        Column(title: "Continue Watching") {
-            let entries = resume.visible
-            if entries.isEmpty {
+        Column(title: "Continue Watching", scrollAnchor: anchorFor(columnIndex: 2)) {
+            let items = continueItems
+            if items.isEmpty {
                 EmptyColumn(icon: "🍿", title: "Nothing in progress", hint: "Start watching something and it'll show up here.")
             } else {
-                ForEach(entries, id: \.vpath) { item in
+                ForEach(items, id: \.vpath) { item in
                     let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
-                    ContinueRow(
-                        icon: "🎬",
+                    let key = HomeFocus.continueWatching(item.vpath)
+                    GridContinueRow(
                         title: DuplexFormat.leaf(of: item.vpath),
                         subtitle: DuplexFormat.parent(of: item.vpath),
                         progress: progress,
-                        onSelect: { nav.push(.player(vpath: item.vpath)) },
-                        onRemove: { resume.remove(item.vpath) }
+                        isFocused: focus == key
                     )
-                    .focused($focus, equals: .continueWatching(item.vpath))
+                    .id(key)
                 }
             }
         }
+    }
+
+    private var footerHint: some View {
+        HStack(spacing: 18) {
+            Spacer()
+            Text("▶︎❙❙  Sort: \(sort.mode.label)")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(DuplexColor.muted)
+            Text("•")
+                .foregroundStyle(DuplexColor.muted)
+            Text("Hold ✓ on a Continue row to forget")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(DuplexColor.muted)
+            Spacer()
+        }
+        .padding(.bottom, 14)
+    }
+
+    /// Returns the focus key if it's in the given column — used to drive each
+    /// `Column`'s ScrollViewReader so the focused row stays in view.
+    private func anchorFor(columnIndex: Int) -> AnyHashable? {
+        guard let f = focus else { return nil }
+        let cols = focusColumns
+        guard columnIndex >= 0 && columnIndex < cols.count else { return nil }
+        return cols[columnIndex].contains(f) ? AnyHashable(f) : nil
     }
 
     private func sortEntries(_ entries: [Entry]) -> [Entry] {

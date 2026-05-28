@@ -153,7 +153,8 @@ struct PlayerView: View {
                         session.currentAudioTrackIndex = idx
                         pickerOpen = false
                         bumpOSD()
-                    }
+                    },
+                    onClose: { pickerOpen = false }
                 )
             }
         }
@@ -336,9 +337,9 @@ private enum PickerFocus: Hashable {
     case audio(Int)
 }
 
-/// Dual-column picker — subtitles left, audio right. Same visual language as
-/// HomeView's columns. Up/down wraps within a column; left/right falls through
-/// to the focus engine which moves between columns.
+/// Dual-column picker — subtitles left, audio right. Built on `WrapColumns`
+/// so up/down wraps inside a column and left/right crosses to the same row
+/// index in the sibling column. Menu closes the picker.
 private struct PlayerDualPicker: View {
     let subtitleOptions: [PlayerTrackOption]
     let audioOptions: [PlayerTrackOption]
@@ -347,43 +348,60 @@ private struct PlayerDualPicker: View {
     let initialColumn: PickerColumn
     let onSelectSubtitle: (Int) -> Void
     let onSelectAudio: (Int) -> Void
+    let onClose: () -> Void
 
-    @FocusState private var focus: PickerFocus?
+    @State private var focus: PickerFocus?
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.55).ignoresSafeArea()
-            HStack(alignment: .top, spacing: DuplexMetric.columnGap) {
-                columnView(
-                    title: "Subtitles",
-                    options: subtitleOptions,
-                    currentIndex: currentSubtitleIndex,
-                    column: .subtitle,
-                    onSelect: onSelectSubtitle
-                )
-                columnView(
-                    title: "Audio",
-                    options: audioOptions,
-                    currentIndex: currentAudioIndex,
-                    column: .audio,
-                    onSelect: onSelectAudio
-                )
+            WrapColumns(
+                columns: focusColumns,
+                current: $focus,
+                onActivate: handleActivate,
+                onMenuTap: onClose
+            ) {
+                HStack(alignment: .top, spacing: DuplexMetric.columnGap) {
+                    pickerColumn(
+                        title: "Subtitles",
+                        options: subtitleOptions,
+                        currentIndex: currentSubtitleIndex,
+                        makeKey: { PickerFocus.sub($0.index) }
+                    )
+                    pickerColumn(
+                        title: "Audio",
+                        options: audioOptions,
+                        currentIndex: currentAudioIndex,
+                        makeKey: { PickerFocus.audio($0.index) }
+                    )
+                }
+                .frame(maxWidth: 1080, maxHeight: 640)
+                .padding(.horizontal, 40)
             }
-            .frame(maxWidth: 1080, maxHeight: 640)
-            .padding(.horizontal, 40)
         }
-        .onAppear {
-            focus = makeInitialFocus()
+        .onAppear { focus = makeInitialFocus() }
+    }
+
+    private var focusColumns: [[PickerFocus]] {
+        [
+            subtitleOptions.map { PickerFocus.sub($0.index) },
+            audioOptions.map    { PickerFocus.audio($0.index) },
+        ]
+    }
+
+    private func handleActivate(_ key: PickerFocus) {
+        switch key {
+        case .sub(let i):   onSelectSubtitle(i)
+        case .audio(let i): onSelectAudio(i)
         }
     }
 
     @ViewBuilder
-    private func columnView(
+    private func pickerColumn(
         title: String,
         options: [PlayerTrackOption],
         currentIndex: Int,
-        column: PickerColumn,
-        onSelect: @escaping (Int) -> Void
+        makeKey: @escaping (PlayerTrackOption) -> PickerFocus
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title.uppercased())
@@ -394,23 +412,29 @@ private struct PlayerDualPicker: View {
                 .padding(.top, 22)
                 .padding(.bottom, 12)
             Rectangle().fill(DuplexColor.border).frame(height: 1)
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(options) { opt in
-                        let focusKey: PickerFocus = column == .subtitle ? .sub(opt.index) : .audio(opt.index)
-                        Button {
-                            onSelect(opt.index)
-                        } label: {
-                            PickerRowLabel(
-                                option: opt,
-                                isCurrent: opt.index == currentIndex
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(options) { opt in
+                            let key = makeKey(opt)
+                            GridEntryRow(
+                                icon: opt.index == currentIndex ? "✓" : " ",
+                                title: opt.label,
+                                subtitle: nil,
+                                meta: nil,
+                                isFocused: focus == key
                             )
+                            .id(key)
                         }
-                        .buttonStyle(PickerRowButtonStyle())
-                        .focused($focus, equals: focusKey)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .onChange(of: focus) { _, new in
+                    guard let new, options.contains(where: { makeKey($0) == new }) else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(new, anchor: .center)
                     }
                 }
-                .padding(.vertical, 4)
             }
         }
         .frame(maxWidth: 520, maxHeight: 600)
@@ -420,10 +444,6 @@ private struct PlayerDualPicker: View {
             RoundedRectangle(cornerRadius: DuplexMetric.panelRadius)
                 .stroke(DuplexColor.border, lineWidth: 1)
         )
-        // Group this column for the focus engine so left/right at a column
-        // edge moves cleanly to the sibling column instead of jumping to
-        // whatever focusable view happens to be nearby outside the picker.
-        .focusSection()
     }
 
     private func makeInitialFocus() -> PickerFocus {
@@ -438,45 +458,6 @@ private struct PlayerDualPicker: View {
                 ? currentAudioIndex
                 : (audioOptions.first?.index ?? 0)
             return .audio(idx)
-        }
-    }
-}
-
-/// Picker row label — focus styling is applied by `PickerRowButtonStyle`.
-private struct PickerRowLabel: View {
-    let option: PlayerTrackOption
-    let isCurrent: Bool
-
-    var body: some View {
-        EntryRowLabel(
-            icon: isCurrent ? "✓" : " ",
-            title: option.label,
-            subtitle: nil,
-            meta: nil
-        )
-    }
-}
-
-private struct PickerRowButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        StyleView(configuration: configuration)
-    }
-    private struct StyleView: View {
-        let configuration: ButtonStyleConfiguration
-        @Environment(\.isFocused) private var isFocused: Bool
-        var body: some View {
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(isFocused ? DuplexColor.accent : Color.clear)
-                    .frame(width: DuplexMetric.selectedBar)
-                configuration.label
-                    .padding(.vertical, DuplexMetric.rowVPad)
-                    .padding(.horizontal, DuplexMetric.rowHPad)
-            }
-            .background(isFocused ? DuplexColor.accentSoft : Color.clear)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: isFocused)
-            .contentShape(Rectangle())
         }
     }
 }
