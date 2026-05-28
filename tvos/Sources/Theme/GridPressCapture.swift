@@ -67,6 +67,14 @@ final class GridPressCaptureVC: UIViewController {
     private var menuHoldTimer: Timer?
     private var menuHoldFired = false
 
+    /// Hold-to-scroll: when the user holds the up or down arrow on a list,
+    /// keep firing `onUp` / `onDown` at an accelerating rate. Mirrors the
+    /// player's scrub pattern so the interaction model feels consistent.
+    private enum HoldDir { case up, down }
+    private var holdDir: HoldDir?
+    private var holdStartedAt: Date?
+    private var holdTimer: Timer?
+
     private let holdDuration: TimeInterval = 0.55
 
     override func loadView() {
@@ -97,7 +105,13 @@ final class GridPressCaptureVC: UIViewController {
         for press in presses {
             NSLog("[Duplex/Grid] pressesBegan type=%d active=%d", press.type.rawValue, isActiveForFocus ? 1 : 0)
             switch press.type {
-            case .leftArrow, .rightArrow, .upArrow, .downArrow, .playPause:
+            case .upArrow:
+                startHold(.up)
+                consumed = true
+            case .downArrow:
+                startHold(.down)
+                consumed = true
+            case .leftArrow, .rightArrow, .playPause:
                 consumed = true
             case .select:
                 selectHoldFired = false
@@ -133,8 +147,8 @@ final class GridPressCaptureVC: UIViewController {
             switch press.type {
             case .leftArrow:  onLeft();  consumed = true
             case .rightArrow: onRight(); consumed = true
-            case .upArrow:    onUp();    consumed = true
-            case .downArrow:  onDown();  consumed = true
+            case .upArrow:    endHold(); consumed = true
+            case .downArrow:  endHold(); consumed = true
             case .playPause:
                 onPlayPause?()
                 consumed = true
@@ -168,10 +182,71 @@ final class GridPressCaptureVC: UIViewController {
                 menuHoldTimer?.invalidate()
                 menuHoldTimer = nil
                 menuHoldFired = false
+            case .upArrow, .downArrow:
+                endHold()
             default:
                 break
             }
         }
         super.pressesCancelled(presses, with: event)
+    }
+
+    // MARK: - hold-to-scroll
+
+    private func startHold(_ dir: HoldDir) {
+        endHold()
+        holdDir = dir
+        holdStartedAt = Date()
+        // Immediate single-step so a quick tap moves exactly one row.
+        fireHoldStep(dir, count: 1)
+        // Tick frequently; the first ~0.4s of ticks deliberately produce zero
+        // steps so a hold under that threshold still feels like a single tap.
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.holdTick() }
+        }
+    }
+
+    private func endHold() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        holdDir = nil
+        holdStartedAt = nil
+    }
+
+    private func holdTick() {
+        guard let dir = holdDir, let started = holdStartedAt else { return }
+        let elapsed = Date().timeIntervalSince(started)
+        let stepsThisTick = holdStepsForElapsed(elapsed)
+        if stepsThisTick > 0 {
+            fireHoldStep(dir, count: stepsThisTick)
+        }
+    }
+
+    /// Per-tick step count while the arrow is held. Curve mirrors the player's
+    /// scrub-acceleration shape: nothing for the first ~0.4s (so tap stays a
+    /// tap), then steadily faster the longer the press is held.
+    ///
+    ///   <0.4s : 0 steps/tick (single-tap range)
+    ///   <1.0s : 1 step/tick  (~10 rows/sec)
+    ///   <2.5s : 2 steps/tick (~20 rows/sec)
+    ///   <5.0s : 4 steps/tick (~40 rows/sec)
+    ///   ≥5.0s : 8 steps/tick (~80 rows/sec)
+    private func holdStepsForElapsed(_ elapsed: TimeInterval) -> Int {
+        switch elapsed {
+        case ..<0.4: return 0
+        case ..<1.0: return 1
+        case ..<2.5: return 2
+        case ..<5.0: return 4
+        default:     return 8
+        }
+    }
+
+    private func fireHoldStep(_ dir: HoldDir, count: Int) {
+        for _ in 0..<count {
+            switch dir {
+            case .up:   onUp()
+            case .down: onDown()
+            }
+        }
     }
 }
