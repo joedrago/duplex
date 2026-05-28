@@ -5,6 +5,18 @@ options:
         tvOS: "17.0"
 settings:
     SERVER_URL: http://localhost:2345
+packages:
+    # VLCKit (the workhorse — plays MKV/HEVC HDR/AC-3/embedded subs/etc.).
+    # Using the community SPM repackage since VideoLAN doesn't ship SPM
+    # themselves. 3.5.x is the stable VLCKit 3.x branch; 4.x is still alpha.
+    VLCKitSPM:
+        url: https://github.com/tylerjonesio/vlckit-spm
+        from: "3.5.1"
+    # VLCUI — SwiftUI wrapper around VLCKit. MIT license. Pulls in `VLCKit`
+    # transitively at link time (it expects the consumer to provide it).
+    VLCUI:
+        url: https://github.com/LePips/VLCUI
+        from: "0.8.0"
 targets:
     Duplex:
         type: application
@@ -17,3 +29,6 @@ targets:
             PRODUCT_BUNDLE_IDENTIFIER: com.duplex.app
             CODE_SIGN_STYLE: Automatic
             ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
+        dependencies:
+            - package: VLCKitSPM
+            - package: VLCUI

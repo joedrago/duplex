@@ -41,11 +41,21 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
+/// Identifies a focusable row on the home screen. Three columns, three cases.
+enum HomeFocus: Hashable {
+    case library(String)
+    case recent(String)
+    case continueWatching(String)
+}
+
 struct HomeView: View {
     @StateObject private var vm = HomeViewModel()
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var resume = ResumeStore.shared
     @ObservedObject private var sort = SortPreference.shared
+
+    @FocusState private var focus: HomeFocus?
+    @State private var didSetInitialFocus = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,7 +70,35 @@ struct HomeView: View {
         }
         .background(DuplexColor.bg.ignoresSafeArea())
         .navigationBarHidden(true)
-        .task { await vm.load() }
+        .task {
+            await vm.load()
+            applyInitialFocusIfNeeded()
+        }
+        .onAppear { applyInitialFocusIfNeeded() }
+    }
+
+    /// Prefer top of Continue Watching; fall back to Recently Added; fall back
+    /// to Libraries. Only fires once per appearance — subsequent re-renders
+    /// don't yank focus away from wherever the user has navigated.
+    private func applyInitialFocusIfNeeded() {
+        guard !didSetInitialFocus else { return }
+        if let firstResume = resume.visible.first {
+            focus = .continueWatching(firstResume.vpath)
+            didSetInitialFocus = true
+            return
+        }
+        if case .loaded(let items) = vm.recent, let first = items.first {
+            focus = .recent(first.id)
+            didSetInitialFocus = true
+            return
+        }
+        if case .loaded(let entries) = vm.libraries {
+            let sorted = sortEntries(entries)
+            if let first = sorted.first {
+                focus = .library(first.name)
+                didSetInitialFocus = true
+            }
+        }
     }
 
     private var librariesColumn: some View {
@@ -86,6 +124,7 @@ struct HomeView: View {
                             ) {
                                 nav.push(.browse(path: name))
                             }
+                            .focused($focus, equals: .library(name))
                         case .file(let name, _, let size, _, _):
                             EntryRow(
                                 icon: "🎬",
@@ -95,6 +134,7 @@ struct HomeView: View {
                             ) {
                                 nav.push(.player(vpath: name))
                             }
+                            .focused($focus, equals: .library(name))
                         }
                     }
                 }
@@ -125,6 +165,7 @@ struct HomeView: View {
                             ) {
                                 nav.push(.browse(path: vpath))
                             }
+                            .focused($focus, equals: .recent(vpath))
                         case .file(let name, let vpath, let mtime, let size):
                             EntryRow(
                                 icon: "🎬",
@@ -134,6 +175,7 @@ struct HomeView: View {
                             ) {
                                 nav.push(.player(vpath: vpath))
                             }
+                            .focused($focus, equals: .recent(vpath))
                         }
                     }
                 }
@@ -157,6 +199,7 @@ struct HomeView: View {
                         onSelect: { nav.push(.player(vpath: item.vpath)) },
                         onRemove: { resume.remove(item.vpath) }
                     )
+                    .focused($focus, equals: .continueWatching(item.vpath))
                 }
             }
         }
