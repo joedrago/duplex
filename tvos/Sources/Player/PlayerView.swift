@@ -65,6 +65,10 @@ struct PlayerView: View {
             osdHideTask?.cancel()
             session.teardown()
         }
+        .onChange(of: session.remoteCommandTick) { _, _ in
+            // Siri / Control Center / headphone button just fired — flash OSD.
+            bumpOSD()
+        }
         .navigationBarHidden(true)
         .background(
             // UIKit bridge captures press-began / press-ended so we can detect
@@ -494,10 +498,15 @@ final class PlayerSession: ObservableObject {
     @Published var subtitleTracks: [MediaTrack] = []
     @Published var currentAudioTrackIndex: Int = 0
     @Published var currentSubtitleTrackIndex: Int = -1
+    /// Bumps each time a remote command (Siri / Control Center) fires, so
+    /// PlayerView can flash the OSD in response.
+    @Published var remoteCommandTick: Int = 0
 
     private var didSeekToResume = false
     private var didApplyDefaults = false
     private var lastHeartbeatTickSecond: Int = -1
+    private let nowPlaying = NowPlayingController()
+    private var attachedNowPlaying = false
 
     func makeConfiguration(client: DuplexClient, vpath: String) -> VLCVideoPlayer.Configuration {
         var cfg = VLCVideoPlayer.Configuration(url: client.rawURL(path: vpath))
@@ -514,7 +523,20 @@ final class PlayerSession: ObservableObject {
     }
 
     func teardown() {
-        // Heartbeat already persists; nothing extra to do.
+        if attachedNowPlaying {
+            nowPlaying.detach()
+            attachedNowPlaying = false
+        }
+    }
+
+    /// Attach Siri / Control Center integration. Idempotent.
+    func attachNowPlayingIfNeeded(proxy: VLCVideoPlayer.Proxy, vpath: String) {
+        guard !attachedNowPlaying else { return }
+        nowPlaying.attach(proxy: proxy, session: self, vpath: vpath)
+        nowPlaying.onRemoteCommand = { [weak self] in
+            self?.remoteCommandTick &+= 1
+        }
+        attachedNowPlaying = true
     }
 
     func handleState(_ state: VLCVideoPlayer.State, info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy, vpath: String) {
@@ -524,6 +546,7 @@ final class PlayerSession: ObservableObject {
             break
         case .playing:
             isPlaying = true
+            attachNowPlayingIfNeeded(proxy: proxy, vpath: vpath)
             applyDefaultsIfNeeded(info: info, proxy: proxy)
             if !didSeekToResume, let entry = ResumeStore.shared.get(vpath), entry.pos > 5 {
                 didSeekToResume = true
@@ -552,6 +575,13 @@ final class PlayerSession: ObservableObject {
         self.positionSeconds = positionSeconds
         self.durationSeconds = totalSeconds
         ingestTracks(info: info)
+        if attachedNowPlaying {
+            nowPlaying.updateNowPlayingInfo(
+                positionSeconds: positionSeconds,
+                durationSeconds: totalSeconds,
+                isPlaying: isPlaying
+            )
+        }
         if positionSeconds > 0,
            positionSeconds % 5 == 0,
            positionSeconds != lastHeartbeatTickSecond {
