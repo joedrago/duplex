@@ -1,5 +1,60 @@
+import CoreText
 import SwiftUI
+import UIKit
 import VLCUI
+
+/// Registers the bundled `SubtitleFont.ttf` with CoreText and exposes its
+/// PostScript name. tvOS ships only Apple's modern .SFUI font, which VLCKit's
+/// freetype text renderer can't parse (FT error 3 / unknown file format), so
+/// SRT/SubRip subtitles never paint until we hand the renderer a TTF it can
+/// actually open. Registered process-scoped so `UIFont(name:size:)` resolves.
+enum SubtitleFontRegistry {
+    static let postScriptName: String? = registerAndDeriveName()
+
+    private static func registerAndDeriveName() -> String? {
+        guard let url = Bundle.main.url(forResource: "SubtitleFont", withExtension: "ttf") else {
+            NSLog("[Duplex/SubtitleFont] bundled font not found")
+            return nil
+        }
+        var err: Unmanaged<CFError>?
+        let ok = CTFontManagerRegisterFontsForURL(url as CFURL, .process, &err)
+        if !ok, let e = err?.takeUnretainedValue() {
+            NSLog("[Duplex/SubtitleFont] CTFontManagerRegisterFontsForURL failed: %@",
+                  String(describing: e))
+        }
+        guard let descs = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor],
+              let desc = descs.first,
+              let name = CTFontDescriptorCopyAttribute(desc, kCTFontNameAttribute) as? String else {
+            NSLog("[Duplex/SubtitleFont] could not read PostScript name from %@", url.path)
+            return nil
+        }
+        NSLog("[Duplex/SubtitleFont] registered psName=%@", name)
+        return name
+    }
+}
+
+/// Bridges VLC's internal logging into our `[Duplex/VLC]` NSLog stream so we
+/// can debug subtitle / decoder / module-loading issues from the device console.
+/// Filters to subtitle-relevant lines only — VLC at .info level is otherwise
+/// extremely chatty.
+final class DuplexVLCLogger: VLCVideoPlayerLogger {
+    static let shared = DuplexVLCLogger()
+    func vlcVideoPlayer(didLog message: String, at level: VLCVideoPlayer.LoggingLevel) {
+        let lower = message.lowercased()
+        let interesting = lower.contains("sub")
+            || lower.contains("freetype")
+            || lower.contains("quartz")
+            || lower.contains("text-renderer")
+            || lower.contains("font")
+            || lower.contains("srt")
+            || lower.contains("subrip")
+            || lower.contains("decoder")
+            || lower.contains("error")
+            || lower.contains("warning")
+        guard interesting else { return }
+        NSLog("[Duplex/VLC] %@", message)
+    }
+}
 
 /// VLCKit-backed player. Hands `/api/raw?path=…` straight to libVLC and lets
 /// it handle demux/decode/audio/subs/HDR. We add a SwiftUI OSD on top because
@@ -75,6 +130,10 @@ struct PlayerView: View {
         .task { await session.start(client: client, vpath: vpath) }
         .onDisappear {
             osdHideTask?.cancel()
+            // Without an explicit stop, the underlying VLCMediaPlayer keeps
+            // decoding (and the audio session keeps the audio audible) after
+            // the user pops back to the browse/home routes.
+            proxy.stop()
             session.teardown()
         }
         .onChange(of: session.remoteCommandTick) { _, _ in
@@ -126,6 +185,7 @@ struct PlayerView: View {
         ZStack(alignment: .bottom) {
             VLCVideoPlayer { session.makeConfiguration(client: client, vpath: vpath) }
                 .proxy(proxy)
+                .logger(DuplexVLCLogger.shared, level: .info)
                 .onStateUpdated { state, info in
                     Task { @MainActor in session.handleState(state, info: info, proxy: proxy, vpath: vpath) }
                 }
@@ -144,7 +204,7 @@ struct PlayerView: View {
                         posSec = timeSec
                     }
                     Task { @MainActor in
-                        session.handleTick(positionSeconds: posSec, totalSeconds: totalSec, info: info, vpath: vpath)
+                        session.handleTick(positionSeconds: posSec, totalSeconds: totalSec, info: info, proxy: proxy, vpath: vpath)
                     }
                 }
                 .ignoresSafeArea()
@@ -169,6 +229,7 @@ struct PlayerView: View {
                     currentAudioIndex: session.currentAudioTrackIndex,
                     initialColumn: pickerInitialColumn,
                     onSelectSubtitle: { idx in
+                        NSLog("[Duplex/Player] setSubtitleTrack(absolute: %d)", idx)
                         proxy.setSubtitleTrack(.absolute(idx))
                         session.currentSubtitleTrackIndex = idx
                         TrackPrefsStore.shared.setSubtitle(vpath: vpath, index: idx)
@@ -176,6 +237,7 @@ struct PlayerView: View {
                         bumpOSD()
                     },
                     onSelectAudio: { idx in
+                        NSLog("[Duplex/Player] setAudioTrack(absolute: %d)", idx)
                         proxy.setAudioTrack(.absolute(idx))
                         session.currentAudioTrackIndex = idx
                         TrackPrefsStore.shared.setAudio(vpath: vpath, index: idx)
@@ -513,6 +575,9 @@ final class PlayerSession: ObservableObject {
 
     private var didSeekToResume = false
     private var didApplyDefaults = false
+    private var didApplySavedSub = false
+    private var didAttachSidecars = false
+    private var sidecarSubURLs: [(idx: Int, lang: String?, url: URL)] = []
     private var lastHeartbeatTickSecond: Int = -1
     private let nowPlaying = NowPlayingController()
     private var attachedNowPlaying = false
@@ -521,6 +586,21 @@ final class PlayerSession: ObservableObject {
         let raw = client.rawURL(path: vpath)
         var cfg = VLCVideoPlayer.Configuration(url: raw)
         cfg.autoPlay = true
+        // VLCUI's setConfigurationValues calls setSubtitleFont(...) at startup
+        // with the configuration's font. We have to plant our bundled TTF
+        // here, otherwise the default (UIFont.systemFont → ".SFUI-Regular")
+        // wins and VLCKit's freetype renderer fails to load it on tvOS.
+        if let psName = SubtitleFontRegistry.postScriptName,
+           let uifont = UIFont(name: psName, size: 22) {
+            cfg.subtitleFont = .absolute(uifont)
+        }
+        // Per VLCUI: subtitle size magnitudes are inverted — larger value
+        // means smaller glyphs. VLCKit's default paints text enormous on
+        // tvOS; ~40 lands at a TV-readable size.
+        cfg.subtitleSize = .absolute(24)
+        // Warm yellow, matching the `.cue-overlay` color in web/style.css
+        // (#f5e6a8) so the platforms stay visually consistent.
+        cfg.subtitleColor = .absolute(UIColor(red: 245.0/255.0, green: 230.0/255.0, blue: 168.0/255.0, alpha: 1.0))
         return cfg
     }
 
@@ -528,14 +608,46 @@ final class PlayerSession: ObservableObject {
         guard case .idle = state else { return }
         NSLog("[Duplex/Player] start vpath=%@", vpath)
         state = .loading
-        let next: NextResponse? = (try? await client.next(path: vpath)) ?? nil
+        async let nextTask:     NextResponse? = (try? await client.next(path: vpath)) ?? nil
+        async let manifestTask: Manifest?     = (try? await client.manifest(path: vpath)) ?? nil
+        let next     = await nextTask
+        let manifest = await manifestTask
+
         if let next {
             NSLog("[Duplex/Player] /api/next for=%@ → name=%@ vpath=%@", vpath, next.name, next.vpath)
         } else {
             NSLog("[Duplex/Player] /api/next for=%@ → none", vpath)
         }
+
+        // Capture sidecar subtitle URLs so we can hand them to VLC as playback
+        // children once the media is open. Without this, .srt/.vtt files next
+        // to the video never appear in the subtitle picker.
+        let sidecars = manifest?.sidecars ?? []
+        self.sidecarSubURLs = sidecars.map { sc in
+            (idx: sc.index, lang: sc.language, url: client.sidecarURL(path: vpath, index: sc.index))
+        }
+        NSLog("[Duplex/Player] manifest sidecars=%d", sidecars.count)
+
         state = .playing
         self.nextEntry = next
+    }
+
+    /// Add the manifest's sidecar subtitle files to VLC as playback children.
+    /// Idempotent — only runs once per session, after VLC reports `.playing`.
+    ///
+    /// `enforce: true` on the first slave so VLC activates it immediately —
+    /// without this, text-format slaves load into the track list but never
+    /// actually render until the user opens the picker AND VLC's text
+    /// renderer is happy. Force-enabling lets us verify the rendering path.
+    func attachSidecarsIfNeeded(proxy: VLCVideoPlayer.Proxy) {
+        guard !didAttachSidecars else { return }
+        didAttachSidecars = true
+        for (i, sc) in sidecarSubURLs.enumerated() {
+            let enforce = (i == 0)
+            NSLog("[Duplex/Player] addPlaybackChild sub idx=%d lang=%@ enforce=%d url=%@",
+                  sc.idx, sc.lang ?? "?", enforce ? 1 : 0, sc.url.absoluteString)
+            proxy.addPlaybackChild(.init(url: sc.url, type: .subtitle, enforce: enforce))
+        }
     }
 
     func teardown() {
@@ -563,6 +675,7 @@ final class PlayerSession: ObservableObject {
         case .playing:
             isPlaying = true
             attachNowPlayingIfNeeded(proxy: proxy, vpath: vpath)
+            attachSidecarsIfNeeded(proxy: proxy)
             applyDefaultsIfNeeded(info: info, proxy: proxy, vpath: vpath)
             if !didSeekToResume, let entry = ResumeStore.shared.get(vpath), entry.pos > 5 {
                 didSeekToResume = true
@@ -589,7 +702,7 @@ final class PlayerSession: ObservableObject {
         }
     }
 
-    func handleTick(positionSeconds: Int, totalSeconds: Int, info: VLCVideoPlayer.PlaybackInformation, vpath: String) {
+    func handleTick(positionSeconds: Int, totalSeconds: Int, info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy, vpath: String) {
         if positionSeconds != self.positionSeconds || totalSeconds != self.durationSeconds {
             NSLog("[Duplex/Player/T] tick pos=%ds dur=%ds infoPos=%.3f",
                   positionSeconds, totalSeconds, Double(info.position))
@@ -597,6 +710,7 @@ final class PlayerSession: ObservableObject {
         self.positionSeconds = positionSeconds
         self.durationSeconds = totalSeconds
         ingestTracks(info: info)
+        applySavedSubIfPossible(proxy: proxy, vpath: vpath)
         if attachedNowPlaying {
             nowPlaying.updateNowPlayingInfo(
                 positionSeconds: positionSeconds,
@@ -620,39 +734,38 @@ final class PlayerSession: ObservableObject {
     private func ingestTracks(info: VLCVideoPlayer.PlaybackInformation) {
         let audio = info.audioTracks.filter { isRealTrack($0) }
         let subs = info.subtitleTracks.filter { isRealTrack($0) }
-        if audio != audioTracks { audioTracks = audio }
-        if subs != subtitleTracks { subtitleTracks = subs }
+        if audio != audioTracks {
+            audioTracks = audio
+            NSLog("[Duplex/Player] audio tracks=%d: %@",
+                  audio.count, audio.map { "[\($0.index):\($0.title)]" }.joined(separator: " "))
+        }
+        if subs != subtitleTracks {
+            subtitleTracks = subs
+            NSLog("[Duplex/Player] sub tracks=%d: %@",
+                  subs.count, subs.map { "[\($0.index):\($0.title)]" }.joined(separator: " "))
+        }
         if info.currentAudioTrack.index != currentAudioTrackIndex {
             currentAudioTrackIndex = info.currentAudioTrack.index
         }
         if info.currentSubtitleTrack.index != currentSubtitleTrackIndex {
+            NSLog("[Duplex/Player] currentSub changed %d → %d",
+                  currentSubtitleTrackIndex, info.currentSubtitleTrack.index)
             currentSubtitleTrackIndex = info.currentSubtitleTrack.index
         }
     }
 
-    /// Apply audio + subtitle preferences once, after the first .playing event.
-    /// Per-video saved choices (TrackPrefsStore) win over defaults. Defaults:
-    /// subs off, audio defaults to the first English-language track if we can
-    /// detect one, otherwise leave VLC's default selection alone.
+    /// Apply audio defaults once, after the first .playing event. Subtitle
+    /// pref is handled separately via `applySavedSubIfPossible` because
+    /// sidecar tracks load asynchronously — they aren't in `info.subtitleTracks`
+    /// at the moment of the first .playing event.
     private func applyDefaultsIfNeeded(info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy, vpath: String) {
         guard !didApplyDefaults else { return }
         didApplyDefaults = true
 
         let saved = TrackPrefsStore.shared.get(vpath)
         let realAudio = info.audioTracks.filter { isRealTrack($0) }
-        let realSubs  = info.subtitleTracks.filter { isRealTrack($0) }
 
-        // 1. Subtitle: saved pref wins (incl. explicit -1 / "Off"); otherwise off.
-        if let savedSub = saved?.sub,
-           savedSub == -1 || realSubs.contains(where: { $0.index == savedSub }) {
-            proxy.setSubtitleTrack(.absolute(savedSub))
-            currentSubtitleTrackIndex = savedSub
-        } else {
-            proxy.setSubtitleTrack(.absolute(-1))
-            currentSubtitleTrackIndex = -1
-        }
-
-        // 2. Audio: saved pref wins; otherwise prefer first English-language
+        // Audio: saved pref wins; otherwise prefer first English-language
         // track; otherwise leave VLC's default alone.
         if let savedAudio = saved?.audio,
            realAudio.contains(where: { $0.index == savedAudio }) {
@@ -661,6 +774,24 @@ final class PlayerSession: ObservableObject {
         } else if let english = realAudio.first(where: { titleHintsEnglish($0.title) }) {
             proxy.setAudioTrack(.absolute(english.index))
             currentAudioTrackIndex = english.index
+        }
+    }
+
+    /// Apply the saved subtitle pref once it's actually available. Sidecars
+    /// are added as VLC playback children after .playing fires, so they show
+    /// up in `subtitleTracks` a few ticks later. This is called from
+    /// `ingestTracks` whenever the track list updates.
+    private func applySavedSubIfPossible(proxy: VLCVideoPlayer.Proxy, vpath: String) {
+        guard !didApplySavedSub else { return }
+        guard let savedSub = TrackPrefsStore.shared.get(vpath)?.sub else {
+            didApplySavedSub = true
+            return
+        }
+        if savedSub == -1 || subtitleTracks.contains(where: { $0.index == savedSub }) {
+            NSLog("[Duplex/Player] apply saved sub idx=%d", savedSub)
+            proxy.setSubtitleTrack(.absolute(savedSub))
+            currentSubtitleTrackIndex = savedSub
+            didApplySavedSub = true
         }
     }
 }
