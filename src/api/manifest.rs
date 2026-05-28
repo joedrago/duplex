@@ -47,6 +47,10 @@ pub struct VideoTrack {
     pub profile: Option<String>,
     pub level: Option<i32>,
     pub pix_fmt: Option<String>,
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_space: Option<String>,
+    pub color_range: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +134,10 @@ pub async fn manifest(
             profile: s.profile.clone(),
             level: s.level,
             pix_fmt: s.pix_fmt.clone(),
+            color_primaries: s.color_primaries.clone(),
+            color_transfer: s.color_transfer.clone(),
+            color_space: s.color_space.clone(),
+            color_range: s.color_range.clone(),
         })
         .collect();
 

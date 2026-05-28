@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Key {
     pub path: PathBuf,
@@ -72,6 +71,18 @@ pub struct Stream {
     pub height: Option<u32>,
     #[serde(default)]
     pub pix_fmt: Option<String>,
+    /// e.g. `bt709`, `bt2020`. HDR content reports `bt2020`.
+    #[serde(default)]
+    pub color_primaries: Option<String>,
+    /// e.g. `bt709`, `smpte2084` (HDR10 / PQ), `arib-std-b67` (HLG).
+    #[serde(default)]
+    pub color_transfer: Option<String>,
+    /// e.g. `bt709`, `bt2020nc`.
+    #[serde(default)]
+    pub color_space: Option<String>,
+    /// `tv` (limited 16–235) or `pc` (full 0–255).
+    #[serde(default)]
+    pub color_range: Option<String>,
     #[serde(default)]
     pub channels: Option<u32>,
     #[serde(default)]
@@ -82,7 +93,6 @@ pub struct Stream {
     pub tags: Option<HashMap<String, String>>,
     #[serde(default)]
     pub disposition: Option<HashMap<String, i32>>,
-
 }
 
 impl Probe {

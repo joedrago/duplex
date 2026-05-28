@@ -242,6 +242,14 @@ class PlayerController extends EventTarget {
         this.canvasCtx = this.canvas.getContext("2d")
         this.host.appendChild(this.canvas)
 
+        // Log HDR detection so the diagnostic record is there — proper PQ /
+        // HLG tone-mapping is "future fun" (needs a WebGL shader). Currently
+        // the browser tone-maps to sRGB and the result tends to look dim.
+        const t = this.manifest?.video_tracks?.[0]?.color_transfer
+        if (t === "smpte2084" || t === "arib-std-b67") {
+            console.log(`[player] HDR content detected (transfer=${t}) — picture may look dim until we add a real tone-map path.`)
+        }
+
         this.videoSink = new VideoSampleSink(this.videoTrack)
     }
 
