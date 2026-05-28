@@ -25,8 +25,15 @@ struct PlayerView: View {
     @State private var pickerOpen: Bool = false
     @State private var pickerInitialColumn: PickerColumn = .subtitle
 
+    // Hold-to-scrub state.
+    @State private var scrubTimer: Timer?
+    @State private var scrubStartedAt: Date?
+    @State private var scrubDirection: ScrubDirection?
+
+    private enum ScrubDirection { case forward, backward }
+
     private let client = DuplexClient()
-    private let seekStep = 10
+    private let baseSeekStep = 10
 
     var body: some View {
         ZStack {
@@ -59,19 +66,39 @@ struct PlayerView: View {
             session.teardown()
         }
         .navigationBarHidden(true)
-        // Stop being focusable while the picker is open, otherwise the focus
-        // engine snaps to the player surface as soon as the user tries to
-        // move past a column edge in the picker.
-        .focusable(!pickerOpen)
-        .onMoveCommand { direction in handleMove(direction) }
-        .onPlayPauseCommand { togglePlay(); bumpOSD() }
-        .onTapGesture { togglePlay(); bumpOSD() }
+        .background(
+            // UIKit bridge captures press-began / press-ended so we can detect
+            // arrow-key holds for accelerating scrub. Active only when no
+            // picker overlay is up — the picker's SwiftUI Buttons handle
+            // input via the normal focus engine.
+            PlayerRemoteInput(
+                isActive: !pickerOpen,
+                onLeftBegan: { startScrub(.backward) },
+                onLeftEnded: { endScrub() },
+                onRightBegan: { startScrub(.forward) },
+                onRightEnded: { endScrub() },
+                onUpTap: {
+                    pickerInitialColumn = .subtitle
+                    pickerOpen = true
+                    osdHideTask?.cancel()
+                },
+                onDownTap: {
+                    pickerInitialColumn = .audio
+                    pickerOpen = true
+                    osdHideTask?.cancel()
+                },
+                onSelectTap: { togglePlay(); bumpOSD() },
+                onPlayPauseTap: { togglePlay(); bumpOSD() },
+                onMenuTap: {
+                    if pickerOpen { pickerOpen = false }
+                    else { nav.path.removeLast() }
+                }
+            )
+        )
         .onExitCommand {
-            if pickerOpen {
-                pickerOpen = false
-            } else {
-                nav.path.removeLast()
-            }
+            // Fires when picker focus has Menu pressed (RemoteInput is inactive then).
+            if pickerOpen { pickerOpen = false }
+            else { nav.path.removeLast() }
         }
     }
 
@@ -156,30 +183,68 @@ struct PlayerView: View {
 
     // MARK: - Input handling
 
-    private func handleMove(_ direction: MoveCommandDirection) {
-        if pickerOpen { return } // picker handles its own focus internally
+    private func togglePlay() {
+        if session.isPlaying { proxy.pause() } else { proxy.play() }
+    }
+
+    /// Begin a scrub. Fires the initial ±baseSeekStep immediately so a quick
+    /// tap still produces a discrete jump, then starts an accelerating timer
+    /// that runs as long as the user holds the arrow key.
+    private func startScrub(_ direction: ScrubDirection) {
+        scrubTimer?.invalidate()
+        scrubTimer = nil
+
+        // Immediate first jump.
+        applyScrub(direction: direction, step: baseSeekStep)
+        bumpOSD()
+
+        scrubStartedAt = Date()
+        scrubDirection = direction
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
+            Task { @MainActor in
+                guard let started = scrubStartedAt, scrubDirection == direction else { return }
+                let elapsed = Date().timeIntervalSince(started)
+                let step = stepForHoldElapsed(elapsed)
+                applyScrub(direction: direction, step: step)
+                bumpOSD()
+            }
+        }
+        scrubTimer = timer
+    }
+
+    private func endScrub() {
+        scrubTimer?.invalidate()
+        scrubTimer = nil
+        scrubStartedAt = nil
+        scrubDirection = nil
+    }
+
+    private func applyScrub(direction: ScrubDirection, step: Int) {
+        guard #available(tvOS 16.0, *) else { return }
+        let d: Duration = .seconds(step)
         switch direction {
-        case .left:
-            if #available(tvOS 16.0, *) { proxy.jumpBackward(.seconds(seekStep)) }
-            bumpOSD()
-        case .right:
-            if #available(tvOS 16.0, *) { proxy.jumpForward(.seconds(seekStep)) }
-            bumpOSD()
-        case .up:
-            pickerInitialColumn = .subtitle
-            pickerOpen = true
-            osdHideTask?.cancel()
-        case .down:
-            pickerInitialColumn = .audio
-            pickerOpen = true
-            osdHideTask?.cancel()
-        @unknown default:
-            break
+        case .forward:  proxy.jumpForward(d)
+        case .backward: proxy.jumpBackward(d)
         }
     }
 
-    private func togglePlay() {
-        if session.isPlaying { proxy.pause() } else { proxy.play() }
+    /// Accelerating-scrub step size as a function of how long the arrow key
+    /// has been held. Each tick of the hold-timer fires every 0.4s, so this
+    /// curve is "per-tick" — the effective rate is `step / 0.4s`.
+    ///
+    ///   <1s   : 10s/step  →  25 s/sec
+    ///   <2.5s : 30s/step  →  75 s/sec
+    ///   <5s   : 60s/step  →  150 s/sec  (2.5 min/sec)
+    ///   <8s   : 180s/step →  450 s/sec  (7.5 min/sec)
+    ///   ≥8s   : 600s/step →  1500 s/sec (25 min/sec)
+    private func stepForHoldElapsed(_ elapsed: TimeInterval) -> Int {
+        switch elapsed {
+        case ..<1.0: return 10
+        case ..<2.5: return 30
+        case ..<5.0: return 60
+        case ..<8.0: return 180
+        default:     return 600
+        }
     }
 
     private func bumpOSD() {
