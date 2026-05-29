@@ -35,6 +35,7 @@ struct GridPressCapture: UIViewControllerRepresentable {
     }
 
     private func apply(to vc: GridPressCaptureVC) {
+        let activeChanged = vc.isActiveForFocus != isActive
         vc.isActiveForFocus = isActive
         (vc.view as? FocusableTransparentView)?.isFocusEligible = isActive
         vc.onLeft = onLeft
@@ -46,7 +47,15 @@ struct GridPressCapture: UIViewControllerRepresentable {
         vc.onPlayPause = onPlayPause
         vc.onMenuTap = onMenuTap
         vc.onMenuHold = onMenuHold
-        vc.refreshFocus()
+        if activeChanged {
+            // isActive flips when an overlay (e.g. a binge confirm alert) presents
+            // or dismisses. Calling updateFocusIfNeeded() synchronously here — from
+            // inside SwiftUI's update pass — triggers an AttributeGraph cycle that
+            // can wedge the focus engine and leave a screen blank. Defer it.
+            DispatchQueue.main.async { [weak vc] in vc?.refreshFocus() }
+        } else {
+            vc.refreshFocus()
+        }
     }
 }
 

@@ -70,6 +70,10 @@ final class DuplexVLCLogger: VLCVideoPlayerLogger {
 /// OSD auto-hides 4 seconds after the last interaction.
 struct PlayerView: View {
     let vpath: String
+    /// Non-nil when this playback is part of a binge — finishing the video
+    /// advances that binge's queue, and "next" comes from the queue rather
+    /// than `/api/next`.
+    let bingeId: String?
 
     @StateObject private var proxy = VLCVideoPlayer.Proxy()
     @StateObject private var session = PlayerSession()
@@ -105,17 +109,8 @@ struct PlayerView: View {
                     .tint(DuplexColor.accent)
             case .ended:
                 EndOfVideoCard(
-                    nextName: session.nextEntry?.name,
-                    onContinue: {
-                        if let next = session.nextEntry {
-                            NSLog("[Duplex/Player] Continue pressed: from=%@ → name=%@ vpath=%@",
-                                  vpath, next.name, next.vpath)
-                            nav.path.removeLast()
-                            nav.push(.player(vpath: next.vpath))
-                        } else {
-                            NSLog("[Duplex/Player] Continue pressed but nextEntry is nil; vpath=%@", vpath)
-                        }
-                    },
+                    nextName: nextDisplayName,
+                    onContinue: { playNext() },
                     onDone: {
                         NSLog("[Duplex/Player] Done pressed; vpath=%@", vpath)
                         nav.path.removeLast()
@@ -127,9 +122,17 @@ struct PlayerView: View {
                 playerSurface
             }
         }
-        .task { await session.start(client: client, vpath: vpath) }
+        .task {
+            NSLog("[Duplex/Player/V] appear vpath=%@ bingeId=%@ stackDepth=%d", vpath, bingeId ?? "(none)", nav.path.count)
+            await session.start(client: client, vpath: vpath, bingeId: bingeId)
+        }
         .onDisappear {
+            NSLog("[Duplex/Player/V] disappear vpath=%@ stackDepth=%d state=%@", vpath, nav.path.count, String(describing: session.state))
             osdHideTask?.cancel()
+            // Back-out path for the binge pop rule: if the user leaves with
+            // <5% remaining, advance the binge here (idempotent with the
+            // natural-end pop). Must run before stop() while position is valid.
+            session.maybeAdvanceBinge(vpath: vpath, finished: false)
             // Without an explicit stop, the underlying VLCMediaPlayer keeps
             // decoding (and the audio session keeps the audio audible) after
             // the user pops back to the browse/home routes.
@@ -178,6 +181,43 @@ struct PlayerView: View {
             if pickerOpen { pickerOpen = false }
             else { nav.path.removeLast() }
         }
+    }
+
+    // MARK: - Continue / next-up
+
+    /// What the end-of-video card offers next. For a binge, that's the queue's
+    /// current front (the just-finished video was already popped in the
+    /// `.ended` handler); otherwise it's the `/api/next` sibling.
+    private var nextDisplayName: String? {
+        if let bid = bingeId {
+            return BingeStore.shared.binge(id: bid)?.front.map { DuplexFormat.leaf(of: $0) }
+        }
+        return session.nextEntry?.name
+    }
+
+    /// Play whatever `nextDisplayName` describes, preserving binge binding.
+    private func playNext() {
+        let target: (vpath: String, bingeId: String?)?
+        if let bid = bingeId {
+            target = BingeStore.shared.binge(id: bid)?.front.map { ($0, bid) }
+        } else if let next = session.nextEntry {
+            target = (next.vpath, nil)
+        } else {
+            target = nil
+        }
+        guard let t = target, !nav.path.isEmpty else {
+            NSLog("[Duplex/Player] Continue pressed but no next; vpath=%@", vpath)
+            return
+        }
+        // Replace the current player on the stack ATOMICALLY rather than
+        // removeLast()+push(). The two-step form races inside NavigationStack —
+        // it begins tearing the stack down to root before the push lands, so
+        // the next player mounts onto a half-popped stack, VLC gets stopped
+        // before it can play (instant .ended at pos 0), and the eventual return
+        // to Home renders black. A single assignment swaps the top destination
+        // cleanly; .id(vpath) in makeView still forces a fresh PlayerView.
+        NSLog("[Duplex/Player] Continue → vpath=%@ bingeId=%@", t.vpath, t.bingeId ?? "(none)")
+        nav.path[nav.path.count - 1] = .player(vpath: t.vpath, bingeId: t.bingeId)
     }
 
     @ViewBuilder
@@ -562,6 +602,8 @@ final class PlayerSession: ObservableObject {
 
     @Published var state: State = .idle
     @Published var nextEntry: NextResponse?
+    /// Set when playback is bound to a binge — see `maybeAdvanceBinge`.
+    private(set) var bingeId: String?
     @Published var isPlaying: Bool = false
     @Published var positionSeconds: Int = 0
     @Published var durationSeconds: Int = 0
@@ -604,9 +646,10 @@ final class PlayerSession: ObservableObject {
         return cfg
     }
 
-    func start(client: DuplexClient, vpath: String) async {
+    func start(client: DuplexClient, vpath: String, bingeId: String? = nil) async {
         guard case .idle = state else { return }
-        NSLog("[Duplex/Player] start vpath=%@", vpath)
+        self.bingeId = bingeId
+        NSLog("[Duplex/Player] start vpath=%@ bingeId=%@", vpath, bingeId ?? "(none)")
         state = .loading
         async let nextTask:     NextResponse? = (try? await client.next(path: vpath)) ?? nil
         async let manifestTask: Manifest?     = (try? await client.manifest(path: vpath)) ?? nil
@@ -657,6 +700,20 @@ final class PlayerSession: ObservableObject {
         }
     }
 
+    /// Advance the bound binge past `vpath` when the video is effectively done.
+    /// `finished` is true on a natural end; on back-out we apply the
+    /// "<5% remaining" rule against the last known position. No-op when this
+    /// playback isn't bound to a binge. `popFrontIfMatches` is idempotent — it
+    /// only pops while `vpath` is still the queue's front — so the natural-end
+    /// and back-out callers can't double-pop.
+    func maybeAdvanceBinge(vpath: String, finished: Bool) {
+        guard let bid = bingeId else { return }
+        let watchedEnough = finished ||
+            (durationSeconds > 0 && Double(positionSeconds) >= Double(durationSeconds) * 0.95)
+        guard watchedEnough else { return }
+        BingeStore.shared.popFrontIfMatches(id: bid, vpath: vpath)
+    }
+
     /// Attach Siri / Control Center integration. Idempotent.
     func attachNowPlayingIfNeeded(proxy: VLCVideoPlayer.Proxy, vpath: String) {
         guard !attachedNowPlaying else { return }
@@ -668,6 +725,7 @@ final class PlayerSession: ObservableObject {
     }
 
     func handleState(_ state: VLCVideoPlayer.State, info: VLCVideoPlayer.PlaybackInformation, proxy: VLCVideoPlayer.Proxy, vpath: String) {
+        NSLog("[Duplex/Player/S] vpath=%@ vlcState=%@ pos=%.3f", vpath, String(describing: state), Double(info.position))
         ingestTracks(info: info)
         switch state {
         case .opening, .buffering, .esAdded:
@@ -694,6 +752,9 @@ final class PlayerSession: ObservableObject {
                   vpath, nextEntry?.vpath ?? "(nil)")
             isPlaying = false
             ResumeStore.shared.remove(vpath)
+            // Natural end ⇒ finished ⇒ advance the binge before we render the
+            // end card, so "next" reflects the popped queue.
+            maybeAdvanceBinge(vpath: vpath, finished: true)
             self.state = .ended
         case .error:
             self.state = .failed("VLC reported playback error")

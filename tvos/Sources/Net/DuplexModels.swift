@@ -186,6 +186,15 @@ struct NextResponse: Decodable {
     let mtime: Int64
 }
 
+// MARK: - Flatten
+
+/// Depth-first, name-sorted list of every video vpath beneath a directory.
+/// Taken verbatim as a binge's ordered queue.
+struct FlattenResponse: Decodable {
+    let origin: String
+    let vpaths: [String]
+}
+
 // MARK: - Manifest
 
 struct Manifest: Decodable {

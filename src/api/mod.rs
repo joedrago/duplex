@@ -13,6 +13,7 @@ use crate::probe::ProbeCache;
 pub mod browse;
 pub mod codec_string;
 pub mod debug;
+pub mod flatten;
 pub mod manifest;
 pub mod next;
 pub mod raw;
@@ -50,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .merge(sidecar::routes())
         .merge(recent::routes())
         .merge(next::routes())
+        .merge(flatten::routes())
         .merge(search::routes())
         .merge(debug::routes())
         .merge(web::routes())

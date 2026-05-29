@@ -26,6 +26,56 @@ struct GridEntryRow: View {
     }
 }
 
+/// A saved binge on the home screen. Three lines — origin folder, the next-up
+/// video, and how many remain — with a popcorn glyph to set it apart from the
+/// plain 🎬 Continue Watching rows.
+struct GridBingeRow: View {
+    let origin: String
+    let nextLeaf: String
+    let remaining: Int
+    let isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Rectangle()
+                .fill(isFocused ? DuplexColor.accent : Color.clear)
+                .frame(width: DuplexMetric.selectedBar)
+            HStack(alignment: .top, spacing: 14) {
+                Text("🍿")
+                    .font(.system(size: 26))
+                    .frame(width: 36)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(origin)
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(DuplexColor.fg)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    Text("Next: \(nextLeaf)")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(DuplexColor.muted)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text("\(remaining) remaining")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(DuplexColor.accent)
+                        if isFocused {
+                            Text("· Hold ✓ to delete")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(DuplexColor.muted)
+                        }
+                    }
+                }
+                Spacer(minLength: 8)
+            }
+            .padding(.vertical, DuplexMetric.rowVPad)
+            .padding(.horizontal, DuplexMetric.rowHPad)
+        }
+        .background(isFocused ? DuplexColor.accentSoft : Color.clear)
+        .animation(.easeOut(duration: 0.12), value: isFocused)
+        .contentShape(Rectangle())
+    }
+}
+
 struct GridContinueRow: View {
     let title: String
     let subtitle: String?

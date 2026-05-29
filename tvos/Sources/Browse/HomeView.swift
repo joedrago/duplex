@@ -49,6 +49,7 @@ enum HomeFocus: Hashable {
     case search
     case library(String)
     case recent(String)
+    case binge(String)
     case continueWatching(String)
     case settings
 }
@@ -57,10 +58,17 @@ struct HomeView: View {
     @StateObject private var vm = HomeViewModel()
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var resume = ResumeStore.shared
+    @ObservedObject private var binges = BingeStore.shared
     @ObservedObject private var sort = SortPreference.shared
 
     @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
+
+    private let client = DuplexClient()
+
+    // One dialog at a time: create confirm, delete confirm, or error. A single
+    // `.alert` — see BingeDialog for why.
+    @State private var dialog: BingeDialog?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -68,6 +76,7 @@ struct HomeView: View {
             WrapColumns(
                 columns: focusColumns,
                 current: $focus,
+                isActive: dialog == nil,
                 onActivate: handleActivate,
                 onLongSelect: handleLongSelect,
                 onPlayPause: { sort.toggle() }
@@ -85,6 +94,7 @@ struct HomeView: View {
         .background(DuplexColor.bg.ignoresSafeArea())
         .ignoresSafeArea()
         .navigationBarHidden(true)
+        .alert(item: $dialog) { d in bingeAlert(d) }
         .task {
             await vm.load()
             applyInitialFocusIfNeeded()
@@ -117,13 +127,17 @@ struct HomeView: View {
         resume.visible
     }
 
+    private var bingeItems: [Binge] { binges.ordered }
+
     /// Drives `WrapColumns`. Order here matches the visual HStack so left/right
-    /// arrows cross between adjacent columns naturally.
+    /// arrows cross between adjacent columns naturally. The third column stacks
+    /// binges above Continue Watching, so up/down flows through both.
     private var focusColumns: [[HomeFocus]] {
         let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
+        let bingeKeys: [HomeFocus] = bingeItems.map { .binge($0.id) }
         let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
-        return [libKeys, recKeys, conKeys]
+        return [libKeys, recKeys, bingeKeys + conKeys]
     }
 
     // MARK: actions
@@ -134,18 +148,24 @@ struct HomeView: View {
             if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
                 case .dir(let n, _, _):           nav.push(.browse(path: n))
-                case .file(let n, _, _, _, _):    nav.push(.player(vpath: n))
+                case .file(let n, _, _, _, _):    nav.play(vpath: n)
                 }
             }
         case .recent(let id):
             if let item = recentItems.first(where: { $0.id == id }) {
                 switch item {
                 case .dir(_, let vpath, _, _):    nav.push(.browse(path: vpath))
-                case .file(_, let vpath, _, _):   nav.push(.player(vpath: vpath))
+                case .file(_, let vpath, _, _):   nav.play(vpath: vpath)
                 }
             }
+        case .binge(let id):
+            // Play the binge's next-up video, bound to the binge so finishing
+            // it advances the queue. bingeId set ⇒ no interception.
+            if let binge = binges.binge(id: id), let front = binge.front {
+                nav.play(vpath: front, bingeId: binge.id)
+            }
         case .continueWatching(let vpath):
-            nav.push(.player(vpath: vpath))
+            nav.play(vpath: vpath)
         case .settings:
             nav.push(.settings)
         case .search:
@@ -154,12 +174,81 @@ struct HomeView: View {
     }
 
     private func handleLongSelect(_ key: HomeFocus) {
-        guard case .continueWatching(let vpath) = key else { return }
-        resume.remove(vpath)
-        // Re-land on something sensible: prefer the next Continue Watching
-        // entry, then top of Recently Added, then Libraries. Same precedence
-        // as the initial focus on first load.
-        if let first = resume.visible.first {
+        NSLog("[Duplex/Home] longSelect key=%@", String(describing: key))
+        switch key {
+        case .continueWatching(let vpath):
+            resume.remove(vpath)
+            refocusAfterBingeChange()
+        case .binge(let id):
+            // Deleting a binge is deliberately gated behind a confirm.
+            if let b = binges.binge(id: id) { dialog = .confirmDelete(b) }
+        case .library(let name):
+            // Long-press a whole library root to binge everything under it.
+            guard let entry = libraryEntries.first(where: { $0.name == name }), entry.isDir else { return }
+            startBinge(origin: name)
+        case .recent(let id):
+            // Recently Added folders are bingeable too, same as in Browse.
+            guard let item = recentItems.first(where: { $0.id == id }), item.isDir else { return }
+            startBinge(origin: item.vpath)
+        default:
+            break
+        }
+    }
+
+    /// Flatten `origin` server-side and raise the create confirm.
+    private func startBinge(origin: String) {
+        Task {
+            do {
+                let resp = try await client.flatten(path: origin)
+                if resp.vpaths.isEmpty {
+                    dialog = .error("There are no videos in \(DuplexFormat.leaf(of: origin)).")
+                } else {
+                    dialog = .confirmCreate(PendingBinge(origin: origin, vpaths: resp.vpaths))
+                }
+            } catch {
+                dialog = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Builds the one alert shown for any binge dialog state.
+    private func bingeAlert(_ d: BingeDialog) -> Alert {
+        switch d {
+        case .confirmCreate(let p):
+            return Alert(
+                title: Text("Create a Binge?"),
+                message: Text("\(p.origin)\n\(p.vpaths.count) total \(p.vpaths.count == 1 ? "video" : "videos")"),
+                primaryButton: .default(Text("Binge")) {
+                    BingeStore.shared.create(origin: p.origin, vpaths: p.vpaths)
+                    refocusAfterBingeChange()
+                },
+                secondaryButton: .cancel()
+            )
+        case .confirmDelete(let b):
+            return Alert(
+                title: Text("Delete this binge?"),
+                message: Text("\(b.origin)\n\(b.remaining) remaining. This can’t be undone."),
+                primaryButton: .destructive(Text("Delete")) {
+                    BingeStore.shared.remove(id: b.id)
+                    refocusAfterBingeChange()
+                },
+                secondaryButton: .cancel()
+            )
+        case .error(let msg):
+            return Alert(
+                title: Text("Couldn’t build binge"),
+                message: Text(msg),
+                dismissButton: .cancel(Text("OK"))
+            )
+        }
+    }
+
+    /// Land on something sensible after a binge or Continue row is removed:
+    /// next binge, then Continue Watching, then Recently Added, then Libraries.
+    private func refocusAfterBingeChange() {
+        if let first = bingeItems.first {
+            focus = .binge(first.id)
+        } else if let first = resume.visible.first {
             focus = .continueWatching(first.vpath)
         } else if let first = recentItems.first {
             focus = .recent(first.id)
@@ -168,10 +257,15 @@ struct HomeView: View {
         }
     }
 
-    /// Prefer top of Continue Watching; fall back to Recently Added; fall back
-    /// to Libraries. Only fires once per appearance.
+    /// Prefer top of Binges; then Continue Watching; then Recently Added; then
+    /// Libraries. Only fires once per appearance.
     private func applyInitialFocusIfNeeded() {
         guard !didSetInitialFocus else { return }
+        if let first = bingeItems.first {
+            focus = .binge(first.id)
+            didSetInitialFocus = true
+            return
+        }
         if let first = continueItems.first {
             focus = .continueWatching(first.vpath)
             didSetInitialFocus = true
@@ -315,23 +409,84 @@ struct HomeView: View {
     }
 
     private var continueColumn: some View {
-        Column(title: "Continue Watching", scrollAnchor: anchorFor(columnIndex: 2)) {
-            let items = continueItems
-            if items.isEmpty {
-                EmptyColumn(icon: "🍿", title: "Nothing in progress", hint: "Start watching something and it'll show up here.")
-            } else {
-                ForEach(items, id: \.vpath) { item in
-                    let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
-                    let key = HomeFocus.continueWatching(item.vpath)
-                    GridContinueRow(
-                        title: DuplexFormat.leaf(of: item.vpath),
-                        subtitle: DuplexFormat.parent(of: item.vpath),
-                        progress: progress,
-                        isFocused: focus == key
-                    )
-                    .id(key)
-                }
+        Column(title: "Binges", scrollAnchor: anchorFor(columnIndex: 2)) {
+            bingeSection
+            Rectangle()
+                .fill(DuplexColor.border)
+                .frame(height: 1)
+                .padding(.vertical, 6)
+            sectionHeader("Continue Watching")
+            continueSection
+        }
+    }
+
+    @ViewBuilder
+    private var bingeSection: some View {
+        let items = bingeItems
+        if items.isEmpty {
+            EmptyColumn(icon: "🍿", title: "No binges yet", hint: "Hold ✓ on a folder to binge everything in it.")
+        } else {
+            ForEach(items) { binge in
+                let key = HomeFocus.binge(binge.id)
+                GridBingeRow(
+                    origin: binge.origin,
+                    nextLeaf: DuplexFormat.leaf(of: binge.front ?? ""),
+                    remaining: binge.remaining,
+                    isFocused: focus == key
+                )
+                .id(key)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var continueSection: some View {
+        let items = continueItems
+        if items.isEmpty {
+            EmptyColumn(icon: "🎬", title: "Nothing in progress", hint: "Start watching something and it'll show up here.")
+        } else {
+            ForEach(items, id: \.vpath) { item in
+                let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
+                let key = HomeFocus.continueWatching(item.vpath)
+                GridContinueRow(
+                    title: DuplexFormat.leaf(of: item.vpath),
+                    subtitle: DuplexFormat.parent(of: item.vpath),
+                    progress: progress,
+                    isFocused: focus == key
+                )
+                .id(key)
+            }
+        }
+    }
+
+    /// An inline muted section label, matching the column header treatment, for
+    /// sub-sections that live under a single column title.
+    private func sectionHeader(_ text: String) -> some View {
+        HStack {
+            Text(text.uppercased())
+                .font(.system(size: 14, weight: .semibold))
+                .kerning(1.2)
+                .foregroundStyle(DuplexColor.muted)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
+
+    /// Context hint keyed off what's focused, so the long-press affordance is
+    /// always discoverable for the current row.
+    private var holdHint: String? {
+        switch focus {
+        case .binge:            return "Hold ✓ to delete this binge"
+        case .continueWatching: return "Hold ✓ to forget"
+        case .library(let name):
+            let isDir = libraryEntries.first(where: { $0.name == name })?.isDir ?? false
+            return isDir ? "Hold ✓ to binge this library" : nil
+        case .recent(let id):
+            let isDir = recentItems.first(where: { $0.id == id })?.isDir ?? false
+            return isDir ? "Hold ✓ to binge this folder" : nil
+        default:                return nil
         }
     }
 
@@ -341,13 +496,19 @@ struct HomeView: View {
             Text("▶︎❙❙  Sort: \(sort.mode.label)")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(DuplexColor.muted)
-            Text("•")
-                .foregroundStyle(DuplexColor.muted)
-            Text("Hold ✓ on a Continue row to forget")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(DuplexColor.muted)
+            if let hint = holdHint {
+                Text("•")
+                    .foregroundStyle(DuplexColor.muted)
+                Text(hint)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(DuplexColor.muted)
+            }
             Spacer()
         }
+        // Constant height: the panels' ScrollViews fill the space between
+        // header and footer, so a reflowing footer would resize all three.
+        // Reserve the line whether or not a hold-hint is showing.
+        .frame(height: 24)
         .padding(.bottom, 14)
     }
 

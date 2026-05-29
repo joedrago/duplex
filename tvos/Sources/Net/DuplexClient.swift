@@ -50,6 +50,12 @@ struct DuplexClient {
         }
     }
 
+    /// `/api/flatten?path=<vpath>` — depth-first, name-sorted list of every
+    /// video vpath beneath a directory. Powers "Binge this folder".
+    func flatten(path: String) async throws -> FlattenResponse {
+        try await getJSON("/api/flatten", query: ["path": path])
+    }
+
     /// `/api/search?q=<query>&limit=N` — case-insensitive substring search
     /// across every entry. Empty `query` returns no results without round-
     /// tripping to the server.

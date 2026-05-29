@@ -45,6 +45,12 @@ struct BrowseView: View {
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
 
+    private let client = DuplexClient()
+
+    // Binge creation: long-pressing a folder flattens it and raises a confirm.
+    // One dialog state ⇒ one `.alert` (multiple `.alert`s clobber each other).
+    @State private var dialog: BingeDialog?
+
     // Remembered entry name from the last time the list (not the rail) had focus.
     // Lets `crossNavigate` send Rail → List back to where the user was reading,
     // instead of WrapColumns' same-row-index default which would land them on
@@ -57,7 +63,9 @@ struct BrowseView: View {
             WrapColumns(
                 columns: focusColumns,
                 current: $focusedKey,
+                isActive: dialog == nil,
                 onActivate: handleActivate,
+                onLongSelect: handleLongSelect,
                 onPlayPause: { sort.toggle() },
                 onMenuTap: { nav.path.removeLast() },
                 crossNavigate: crossNavigate
@@ -71,6 +79,28 @@ struct BrowseView: View {
         .background(DuplexColor.bg.ignoresSafeArea())
         .ignoresSafeArea()
         .navigationBarHidden(true)
+        .alert(item: $dialog) { d in
+            switch d {
+            case .confirmCreate(let p):
+                return Alert(
+                    title: Text("Create a Binge?"),
+                    message: Text("\(p.origin)\n\(p.vpaths.count) total \(p.vpaths.count == 1 ? "video" : "videos")"),
+                    primaryButton: .default(Text("Binge")) {
+                        BingeStore.shared.create(origin: p.origin, vpaths: p.vpaths)
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .error(let msg):
+                return Alert(
+                    title: Text("Couldn’t build binge"),
+                    message: Text(msg),
+                    dismissButton: .cancel(Text("OK"))
+                )
+            case .confirmDelete:
+                // Binges aren't deleted from Browse; never set here.
+                return Alert(title: Text(""), dismissButton: .cancel())
+            }
+        }
         .task {
             await vm.load(path: dirPath)
             applyInitialFocusIfNeeded()
@@ -279,7 +309,7 @@ struct BrowseView: View {
             guard let entry = sortedEntries.first(where: { $0.name == name }) else { return }
             switch entry {
             case .dir:  nav.push(.browse(path: subpath(name)))
-            case .file: nav.push(.player(vpath: subpath(name)))
+            case .file: nav.play(vpath: subpath(name))
             }
         case .letter(let letter):
             // Jump to (and put focus back on) the first entry that lives under
@@ -287,6 +317,27 @@ struct BrowseView: View {
             // matched row to center.
             if let target = sortedEntries.first(where: { firstLetter(of: $0.name) == letter }) {
                 focusedKey = .entry(target.name)
+            }
+        }
+    }
+
+    /// Long-press a folder to binge its entire subtree. Files ignore the hold
+    /// (they just play on tap). Flattens server-side, then confirms.
+    private func handleLongSelect(_ key: BrowseFocus) {
+        guard case .entry(let name) = key,
+              let entry = sortedEntries.first(where: { $0.name == name }),
+              entry.isDir else { return }
+        let origin = subpath(name)
+        Task {
+            do {
+                let resp = try await client.flatten(path: origin)
+                if resp.vpaths.isEmpty {
+                    dialog = .error("There are no videos in \(DuplexFormat.leaf(of: origin)).")
+                } else {
+                    dialog = .confirmCreate(PendingBinge(origin: origin, vpaths: resp.vpaths))
+                }
+            } catch {
+                dialog = .error(error.localizedDescription)
             }
         }
     }
@@ -299,14 +350,30 @@ struct BrowseView: View {
         didApplyInitialFocus = true
     }
 
+    private var isDirFocused: Bool {
+        if case .entry(let name) = focusedKey,
+           let entry = sortedEntries.first(where: { $0.name == name }) {
+            return entry.isDir
+        }
+        return false
+    }
+
     private var footerHint: some View {
-        HStack {
+        HStack(spacing: 18) {
             Spacer()
             Text("▶︎❙❙  Sort: \(sort.mode.label)")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(DuplexColor.muted)
+            if isDirFocused {
+                Text("•").foregroundStyle(DuplexColor.muted)
+                Text("Hold ✓ to binge this folder")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(DuplexColor.muted)
+            }
             Spacer()
         }
+        // Constant height so toggling the hold-hint never resizes the list.
+        .frame(height: 24)
         .padding(.bottom, 14)
     }
 

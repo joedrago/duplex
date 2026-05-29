@@ -264,7 +264,7 @@ struct SearchView: View {
             guard let item = session.results.first(where: { $0.vpath == vpath }) else { return }
             switch item {
             case .dir:  nav.push(.browse(path: vpath))
-            case .file: nav.push(.player(vpath: vpath))
+            case .file: nav.play(vpath: vpath)
             }
         }
     }
