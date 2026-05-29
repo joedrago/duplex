@@ -264,6 +264,46 @@ main:has(.settings-page) {
     line-height: 1.4;
 }
 
+/* Queue column: Binges stacked above Continue Watching in one scroll area.
+ * The stack scrolls; the two inner lists lay out at their natural height. */
+.queue-stack {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.queue-stack::-webkit-scrollbar {
+    display: none;
+}
+.queue-stack .col-list {
+    flex: 0 0 auto;
+    overflow: visible;
+}
+/* Sub-section label dividing Binges from Continue Watching within the
+ * column — same treatment as a column header, with a divider line above. */
+.col-subheader {
+    padding: 0.7rem 1rem 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-top: 1px solid var(--border);
+    margin-top: 0.25rem;
+}
+/* Compact empty state for the stacked subsections — doesn't grab all the
+ * vertical space, so the other subsection stays visible. */
+.col-empty-state-compact {
+    flex: 0 0 auto;
+    padding: 1.25rem;
+}
+.col-empty-state-compact .empty-state-icon {
+    font-size: 2.25rem;
+}
+
 /* A row in any column: icon + (context?) + name + meta + optional action. */
 .col-row {
     display: flex;

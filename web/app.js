@@ -367,11 +367,10 @@ function renderRoot(data) {
     columns.append(recentCol)
     fetchAndPopulateRecent(recentCol)
 
-    // Binges and Continue Watching are always rendered (even when empty) so
-    // deleting the last entry doesn't reflow the other columns. The empty
-    // states double as discovery.
-    columns.append(renderBingesColumn())
-    columns.append(renderContinueColumn())
+    // Binges stacked above Continue Watching in one column (mirrors tvOS).
+    // Always rendered, even when empty, so deleting the last entry doesn't
+    // reflow the other columns; the empty states double as discovery.
+    columns.append(renderQueueColumn())
 
     app.replaceChildren(columns)
 }
@@ -483,69 +482,48 @@ async function startBinge(originVpath) {
     if (r.kind === "browse" && r.path === "") render()
 }
 
-// "Continue Watching" column: vertical list of rows, each with a small
-// inline "✕" remove button. Always renders the column wrapper, even with
-// zero entries — an empty state replaces the list so deleting the last
-// item doesn't reflow the other root columns.
-function renderContinueColumn() {
-    const items = continueItems()
-    const list = el("ul", { className: "col-list" })
-    const section = el("section", { className: "col col-continue" }, columnHeader("Continue Watching"), list)
+// A compact empty-state `<li>` used inside the stacked queue column.
+function emptyStateLi(icon, title, hint) {
+    return el(
+        "li",
+        { className: "col-empty-state col-empty-state-compact" },
+        el("div", { className: "empty-state-icon" }, icon),
+        el("div", { className: "empty-state-title" }, title),
+        el("div", { className: "empty-state-hint" }, hint)
+    )
+}
 
-    if (items.length === 0) {
-        list.append(
-            el(
-                "li",
-                { className: "col-empty-state" },
-                el("div", { className: "empty-state-icon" }, "🍿"),
-                el("div", { className: "empty-state-title" }, "Nothing in progress"),
-                el("div", { className: "empty-state-hint" }, "Play something and pick up where you left off")
-            )
-        )
-        return section
-    }
-
-    const rebuild = () => {
-        const fresh = renderContinueColumn()
-        section.replaceWith(fresh)
-    }
-
-    for (const it of items) {
-        const basename = it.vpath.split("/").pop() || it.vpath
-        const remaining = Math.max(0, it.dur - it.pos)
-        const pct = Math.max(0, Math.min(100, (it.pos / it.dur) * 100))
-        const link = el(
-            "a",
-            { className: "row-link row-file", href: "#/play/" + encodePath(it.vpath) },
-            el("span", { className: "row-icon" }, "🎬"),
-            el(
-                "div",
-                { className: "row-text" },
-                el("div", { className: "row-name" }, displayName(basename)),
-                el("div", { className: "row-meta" }, `${fmtTime(remaining)} left`)
-            ),
-            el(
-                "div",
-                { className: "row-progress" },
-                el("div", { className: "row-progress-fill", style: `width:${pct.toFixed(1)}%` })
-            )
-        )
-        const removeBtn = el(
-            "button",
-            { className: "row-action", type: "button", title: "Forget this position", "aria-label": "Forget" },
-            "✕"
-        )
-        removeBtn.addEventListener("click", (ev) => {
-            ev.preventDefault()
-            ev.stopPropagation()
-            clearResume(it.vpath)
-            rebuild()
-        })
-        const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
-        row.dataset.name = basename
-        list.append(row)
-    }
-    return section
+// One Continue Watching row: a progress bar + a trailing ✕ to forget it.
+function makeContinueRow(it, rebuild) {
+    const basename = it.vpath.split("/").pop() || it.vpath
+    const remaining = Math.max(0, it.dur - it.pos)
+    const pct = Math.max(0, Math.min(100, (it.pos / it.dur) * 100))
+    const link = el(
+        "a",
+        { className: "row-link row-file", href: "#/play/" + encodePath(it.vpath) },
+        el("span", { className: "row-icon" }, "🎬"),
+        el(
+            "div",
+            { className: "row-text" },
+            el("div", { className: "row-name" }, displayName(basename)),
+            el("div", { className: "row-meta" }, `${fmtTime(remaining)} left`)
+        ),
+        el("div", { className: "row-progress" }, el("div", { className: "row-progress-fill", style: `width:${pct.toFixed(1)}%` }))
+    )
+    const removeBtn = el(
+        "button",
+        { className: "row-action", type: "button", title: "Forget this position", "aria-label": "Forget" },
+        "✕"
+    )
+    removeBtn.addEventListener("click", (ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        clearResume(it.vpath)
+        rebuild()
+    })
+    const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
+    row.dataset.name = basename
+    return row
 }
 
 function continueItems() {
@@ -597,61 +575,71 @@ async function fetchAndPopulateRecent(col) {
     }
 }
 
-// "Binges" column: each binge shows its origin, next-up video, and remaining
-// count; clicking plays the front bound to the binge so finishing it advances
-// the queue. A trailing ✕ deletes the binge (with confirm). Always rendered,
-// even when empty, so deleting the last one doesn't reflow the root columns.
-function renderBingesColumn() {
+// One Binge row: origin + next-up video + remaining count; clicking plays the
+// front bound to the binge. A trailing ✕ deletes it (with confirm).
+function makeBingeRow(b, rebuild) {
+    const front = b.vpaths[0]
+    const leaf = front ? front.split("/").pop() : ""
+    const link = el(
+        "a",
+        { className: "row-link row-file", href: "#/play/" + encodePath(front) + "?binge=" + encodeURIComponent(b.id) },
+        el("span", { className: "row-icon" }, "🍿"),
+        el(
+            "div",
+            { className: "row-text" },
+            el("div", { className: "row-context" }, b.origin),
+            el("div", { className: "row-name" }, displayName(leaf)),
+            el("div", { className: "row-meta" }, `${b.vpaths.length} remaining`)
+        )
+    )
+    const removeBtn = el(
+        "button",
+        { className: "row-action", type: "button", title: "Delete this binge", "aria-label": "Delete binge" },
+        "✕"
+    )
+    removeBtn.addEventListener("click", (ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        if (!confirm(`Delete this binge?\n${b.origin}\n${b.vpaths.length} remaining. This can't be undone.`)) return
+        removeBinge(b.id)
+        rebuild()
+    })
+    const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
+    row.dataset.name = leaf
+    return row
+}
+
+// The third root column: Binges stacked above Continue Watching, sharing one
+// scroll area (mirrors tvOS HomeView). Either subsection can be empty without
+// hiding the other. Both delete actions rebuild the whole column.
+function renderQueueColumn() {
+    const section = el("section", { className: "col col-queue" })
+    const rebuild = () => section.replaceWith(renderQueueColumn())
+
+    const bingeList = el("ul", { className: "col-list" })
     const binges = bingesOrdered()
-    const list = el("ul", { className: "col-list" })
-    const section = el("section", { className: "col col-binges" }, columnHeader("Binges"), list)
-
     if (binges.length === 0) {
-        list.append(
-            el(
-                "li",
-                { className: "col-empty-state" },
-                el("div", { className: "empty-state-icon" }, "🍿"),
-                el("div", { className: "empty-state-title" }, "No binges yet"),
-                el("div", { className: "empty-state-hint" }, "Hit 🍿 on a folder to queue everything in it")
-            )
-        )
-        return section
+        bingeList.append(emptyStateLi("🍿", "No binges yet", "Hit 🍿 on a folder to queue everything in it"))
+    } else {
+        for (const b of binges) bingeList.append(makeBingeRow(b, rebuild))
     }
 
-    const rebuild = () => section.replaceWith(renderBingesColumn())
-
-    for (const b of binges) {
-        const front = b.vpaths[0]
-        const leaf = front ? front.split("/").pop() : ""
-        const link = el(
-            "a",
-            { className: "row-link row-file", href: "#/play/" + encodePath(front) + "?binge=" + encodeURIComponent(b.id) },
-            el("span", { className: "row-icon" }, "🍿"),
-            el(
-                "div",
-                { className: "row-text" },
-                el("div", { className: "row-context" }, b.origin),
-                el("div", { className: "row-name" }, displayName(leaf)),
-                el("div", { className: "row-meta" }, `${b.vpaths.length} remaining`)
-            )
-        )
-        const removeBtn = el(
-            "button",
-            { className: "row-action", type: "button", title: "Delete this binge", "aria-label": "Delete binge" },
-            "✕"
-        )
-        removeBtn.addEventListener("click", (ev) => {
-            ev.preventDefault()
-            ev.stopPropagation()
-            if (!confirm(`Delete this binge?\n${b.origin}\n${b.vpaths.length} remaining. This can't be undone.`)) return
-            removeBinge(b.id)
-            rebuild()
-        })
-        const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
-        row.dataset.name = leaf
-        list.append(row)
+    const contList = el("ul", { className: "col-list" })
+    const items = continueItems()
+    if (items.length === 0) {
+        contList.append(emptyStateLi("🎬", "Nothing in progress", "Play something and pick up where you left off"))
+    } else {
+        for (const it of items) contList.append(makeContinueRow(it, rebuild))
     }
+
+    const stack = el(
+        "div",
+        { className: "queue-stack" },
+        bingeList,
+        el("div", { className: "col-subheader" }, "Continue Watching"),
+        contList
+    )
+    section.append(columnHeader("Binges"), stack)
     return section
 }
 
