@@ -28,6 +28,52 @@ const AUDIO_SCHEDULE_LOOKAHEAD_S = 0.5
 // `requestAnimationFrame` cadence on the user's display is usually 60 Hz; the
 // presentation loop runs every rAF and only draws when a frame is due.
 
+// Enumerate the tracks of a file without starting playback, returning the
+// `video_tracks` / `audio_tracks` shape the UI used to get from the server's
+// ffprobe manifest. The server no longer probes; mediabunny reads the header
+// over HTTP Range requests and tells us the same facts. Used by the browse →
+// play flow to build the audio-track picker before the player exists.
+//
+// `codec_string` is the WebCodecs string for `AudioDecoder.isConfigSupported`.
+// We prefer the decoder config's `codec` (e.g. `mp4a.40.2`) and fall back to
+// the mediabunny codec id (e.g. `ac-3`/`ec-3`, which are already valid
+// WebCodecs strings and route through the registered WASM decoder).
+export async function probeTracks(rawUrl) {
+    const input = new Input({ formats: ALL_FORMATS, source: new UrlSource(rawUrl) })
+    const tracks = await input.getTracks()
+
+    const video_tracks = await Promise.all(
+        tracks.filter((t) => t.isVideoTrack()).map(async (t) => {
+            const cfg = await t.getDecoderConfig().catch(() => null)
+            return {
+                codec: await t.getCodec().catch(() => null),
+                width: await t.getDisplayWidth().catch(() => null),
+                height: await t.getDisplayHeight().catch(() => null),
+                color_transfer: cfg?.colorSpace?.transfer ?? null
+            }
+        })
+    )
+
+    const audio_tracks = await Promise.all(
+        tracks.filter((t) => t.isAudioTrack()).map(async (t) => {
+            const cfg = await t.getDecoderConfig().catch(() => null)
+            const codec = await t.getCodec().catch(() => null)
+            return {
+                codec,
+                codec_string: cfg?.codec ?? codec,
+                sample_rate: cfg?.sampleRate ?? t.sampleRate ?? null,
+                channels: cfg?.numberOfChannels ?? t.numberOfChannels ?? null,
+                // mediabunny reports a channel count, not ffprobe's "5.1"
+                // layout string; the picker falls back to "{N}ch".
+                channel_layout: null,
+                language: await t.getLanguageCode().catch(() => null)
+            }
+        })
+    )
+
+    return { video_tracks, audio_tracks }
+}
+
 export async function startPlayer({ host, manifest, startAt, startAudioOrd, onTimeUpdate, onDurationChange, onEnded, onError }) {
     const ctl = new PlayerController({
         host,
@@ -245,8 +291,10 @@ class PlayerController extends EventTarget {
         // Log HDR detection so the diagnostic record is there — proper PQ /
         // HLG tone-mapping is "future fun" (needs a WebGL shader). Currently
         // the browser tone-maps to sRGB and the result tends to look dim.
-        const t = this.manifest?.video_tracks?.[0]?.color_transfer
-        if (t === "smpte2084" || t === "arib-std-b67") {
+        // `cfg.colorSpace.transfer` uses WebCodecs names ("pq"/"hlg"), not
+        // ffprobe's ("smpte2084"/"arib-std-b67").
+        const t = cfg?.colorSpace?.transfer
+        if (t === "pq" || t === "hlg") {
             console.log(`[player] HDR content detected (transfer=${t}) — picture may look dim until we add a real tone-map path.`)
         }
 

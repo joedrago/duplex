@@ -48,7 +48,6 @@ pub enum Entry {
         ext: Option<String>,
         size: u64,
         mtime: i64,
-        codec_hint: Option<String>,
     },
 }
 
@@ -110,17 +109,11 @@ pub async fn browse(
                 mtime: epoch_seconds(d.mtime),
             }),
             Node::File(f) => {
-                // Cheap quality hint without forcing a probe.
-                let codec_hint = state
-                    .probe
-                    .cached(&f.abs_path, f.size, f.mtime)
-                    .and_then(|p| p.video_codec().map(str::to_string));
                 entries.push(Entry::File {
                     name: name.clone(),
                     ext: f.ext.clone(),
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
-                    codec_hint,
                 });
             }
         }

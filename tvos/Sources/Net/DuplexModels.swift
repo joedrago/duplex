@@ -9,21 +9,21 @@ struct BrowseResponse: Decodable {
 
 enum Entry: Decodable, Identifiable, Hashable {
     case dir(name: String, children: Int, mtime: Int64)
-    case file(name: String, ext: String?, size: UInt64, mtime: Int64, codecHint: String?)
+    case file(name: String, ext: String?, size: UInt64, mtime: Int64)
 
     var id: String { name }
 
     var name: String {
         switch self {
         case .dir(let n, _, _): return n
-        case .file(let n, _, _, _, _): return n
+        case .file(let n, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
         case .dir(_, _, let m): return m
-        case .file(_, _, _, let m, _): return m
+        case .file(_, _, _, let m): return m
         }
     }
 
@@ -33,7 +33,7 @@ enum Entry: Decodable, Identifiable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, name, children, mtime, ext, size, codec_hint
+        case kind, name, children, mtime, ext, size
     }
 
     init(from decoder: Decoder) throws {
@@ -50,8 +50,7 @@ enum Entry: Decodable, Identifiable, Hashable {
             self = .file(name: name,
                          ext: try c.decodeIfPresent(String.self, forKey: .ext),
                          size: try c.decode(UInt64.self, forKey: .size),
-                         mtime: mtime,
-                         codecHint: try c.decodeIfPresent(String.self, forKey: .codec_hint))
+                         mtime: mtime)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")
@@ -197,74 +196,21 @@ struct FlattenResponse: Decodable {
 
 // MARK: - Manifest
 
+// The server no longer probes files, so the manifest carries only what it can
+// know without decoding: path, size, the raw URL, and the scan-derived sidecar
+// list. Track/codec selection is handled by VLCKit reading the file itself
+// (see PlayerView's `ingestTracks`), so we don't model embedded tracks here.
 struct Manifest: Decodable {
     let path: String
     let size: UInt64
-    let duration: Double?
-    let container: String
     let rawURL: String
-    let videoTracks: [VideoTrack]
-    let audioTracks: [AudioTrack]
-    let subtitleTracks: [SubtitleTrack]
     let sidecars: [SidecarEntry]
 
     enum CodingKeys: String, CodingKey {
-        case path, size, duration, container
+        case path, size
         case rawURL = "raw_url"
-        case videoTracks = "video_tracks"
-        case audioTracks = "audio_tracks"
-        case subtitleTracks = "subtitle_tracks"
         case sidecars
     }
-}
-
-struct VideoTrack: Decodable, Hashable {
-    let index: UInt32
-    let codec: String?
-    let codecString: String?
-    let width: UInt32?
-    let height: UInt32?
-    let profile: String?
-    let level: Int32?
-    let pixFmt: String?
-    let colorPrimaries: String?
-    let colorTransfer: String?
-    let colorSpace: String?
-    let colorRange: String?
-
-    enum CodingKeys: String, CodingKey {
-        case index, codec, width, height, profile, level
-        case codecString = "codec_string"
-        case pixFmt = "pix_fmt"
-        case colorPrimaries = "color_primaries"
-        case colorTransfer = "color_transfer"
-        case colorSpace = "color_space"
-        case colorRange = "color_range"
-    }
-}
-
-struct AudioTrack: Decodable, Hashable {
-    let index: UInt32
-    let codec: String?
-    let codecString: String?
-    let channels: UInt32?
-    let channelLayout: String?
-    let sampleRate: UInt32?
-    let language: String?
-
-    enum CodingKeys: String, CodingKey {
-        case index, codec, channels, language
-        case codecString = "codec_string"
-        case channelLayout = "channel_layout"
-        case sampleRate = "sample_rate"
-    }
-}
-
-struct SubtitleTrack: Decodable, Hashable {
-    let index: UInt32
-    let codec: String?
-    let language: String?
-    let format: String   // "text" | "image"
 }
 
 struct SidecarEntry: Decodable, Hashable, Identifiable {

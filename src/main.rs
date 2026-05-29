@@ -8,12 +8,10 @@ use tokio::signal;
 mod api;
 mod config;
 mod library;
-mod probe;
 
 use crate::api::AppState;
 use crate::config::Cli;
 use crate::library::Library;
-use crate::probe::ProbeCache;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,11 +37,8 @@ async fn main() -> Result<()> {
 
     library::watcher::spawn(library.clone(), cli.watch_debounce_ms)?;
 
-    let probe = Arc::new(ProbeCache::new(cli.ffprobe.clone()));
-
     let state = AppState {
         library,
-        probe,
         cfg: Arc::new(cli.clone()),
     };
     let app = api::router(state);

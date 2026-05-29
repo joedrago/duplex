@@ -28,15 +28,6 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", default_value = "info", env = "DUPLEX_LOG")]
     pub log: String,
 
-    /// Path to the ffprobe binary.
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "ffprobe",
-        env = "DUPLEX_FFPROBE"
-    )]
-    pub ffprobe: PathBuf,
-
     /// Filesystem-watcher debounce window, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 300)]
     pub watch_debounce_ms: u64,

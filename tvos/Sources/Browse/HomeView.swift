@@ -148,7 +148,7 @@ struct HomeView: View {
             if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
                 case .dir(let n, _, _):           nav.push(.browse(path: n))
-                case .file(let n, _, _, _, _):    nav.play(vpath: n)
+                case .file(let n, _, _, _):    nav.play(vpath: n)
                 }
             }
         case .recent(let id):
@@ -342,7 +342,7 @@ struct HomeView: View {
                 meta: "\(children) entries",
                 isFocused: focus == key
             )
-        case .file(let name, _, let size, _, _):
+        case .file(let name, _, let size, _):
             GridEntryRow(
                 icon: "🎬",
                 title: name,

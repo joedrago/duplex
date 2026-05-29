@@ -266,7 +266,7 @@ struct BrowseView: View {
                     : "\(children) entries",
                 isFocused: isFocused
             )
-        case .file(let name, _, let size, let mtime, _):
+        case .file(let name, _, let size, let mtime):
             GridEntryRow(
                 icon: "🎬",
                 title: name,

@@ -428,7 +428,6 @@ function makeBrowseRow(entry, vpath) {
     const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
     const name = el("div", { className: "row-name" }, isDir ? entry.name : displayName(entry.name))
-    if (!isDir && entry.codec_hint) name.append(el("span", { className: "badge " + entry.codec_hint }, entry.codec_hint))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
         : [prettySize(entry.size), entry.ext].filter(Boolean)
@@ -1054,6 +1053,20 @@ async function renderPlay(path, bingeId = null) {
         return
     }
 
+    // The server no longer probes files, so the manifest carries only path,
+    // size, raw_url and sidecars. Track/codec facts come from mediabunny
+    // reading the file directly — the same source the player uses — which we
+    // fold back onto `info` so the picker-building code below is unchanged.
+    const { startPlayer, probeTracks } = await import("/player.js")
+    try {
+        const tracks = await probeTracks(info.raw_url)
+        info.video_tracks = tracks.video_tracks
+        info.audio_tracks = tracks.audio_tracks
+    } catch (e) {
+        app.replaceChildren(el("div", { className: "error" }, "couldn't read file: " + e.message), detailsBlock(info))
+        return
+    }
+
     if (!info.video_tracks?.length) {
         app.replaceChildren(el("div", { className: "error" }, "no video track in this file"), detailsBlock(info))
         return
@@ -1237,7 +1250,6 @@ async function renderPlay(path, bingeId = null) {
 
     let controller
     try {
-        const { startPlayer } = await import("/player.js")
         controller = await startPlayer({
             host,
             manifest: info,

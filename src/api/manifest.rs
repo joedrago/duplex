@@ -1,8 +1,8 @@
-//! `/api/manifest` — the slim playback manifest consumed by the new client-side
-//! player. Replaces `/api/file` in spirit: just the facts about what's in the
-//! file (tracks, codecs, sidecars) without any server-side playback decision.
-//! The client does its own `VideoDecoder.isConfigSupported` check and decides
-//! what to do.
+//! `/api/manifest` — the slim playback manifest. The server no longer probes
+//! files: it reports only what it can know without decoding (path, size, the
+//! raw URL, and the scan-derived sidecar list). Each client derives track and
+//! codec facts from the file itself — mediabunny on web, libVLC on tvOS — so
+//! there is no server-side playback decision to make here.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -11,7 +11,6 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::api::codec_string::{audio_codec_string, video_codec_string};
 use crate::api::{vpath, AppState};
 use crate::library::Node;
 
@@ -28,55 +27,8 @@ pub struct ManifestQuery {
 pub struct ManifestResponse {
     pub path: String,
     pub size: u64,
-    pub duration: Option<f64>,
-    pub container: String,
     pub raw_url: String,
-    pub video_tracks: Vec<VideoTrack>,
-    pub audio_tracks: Vec<AudioTrack>,
-    pub subtitle_tracks: Vec<SubtitleTrack>,
     pub sidecars: Vec<SidecarEntry>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VideoTrack {
-    pub index: u32,
-    pub codec: Option<String>,
-    pub codec_string: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub profile: Option<String>,
-    pub level: Option<i32>,
-    pub pix_fmt: Option<String>,
-    pub color_primaries: Option<String>,
-    pub color_transfer: Option<String>,
-    pub color_space: Option<String>,
-    pub color_range: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AudioTrack {
-    pub index: u32,
-    pub codec: Option<String>,
-    pub codec_string: Option<String>,
-    pub channels: Option<u32>,
-    pub channel_layout: Option<String>,
-    pub sample_rate: Option<u32>,
-    pub language: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SubtitleTrack {
-    pub index: u32,
-    pub codec: Option<String>,
-    pub language: Option<String>,
-    pub format: SubFormat,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SubFormat {
-    Text,
-    Image,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,70 +58,8 @@ pub async fn manifest(
     };
     drop(tree);
 
-    let probe = match state.probe.get_or_probe(&f.abs_path, f.size, f.mtime).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(path = %f.abs_path.display(), "probe failed: {e:#}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("probe failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-
     let enc = vpath::encode(&vp);
     let raw_url = format!("/api/raw?path={enc}");
-
-    let video_tracks: Vec<VideoTrack> = probe
-        .streams
-        .iter()
-        .filter(|s| s.codec_type == "video")
-        .map(|s| VideoTrack {
-            index: s.index,
-            codec: s.codec_name.clone(),
-            codec_string: video_codec_string(s),
-            width: s.width,
-            height: s.height,
-            profile: s.profile.clone(),
-            level: s.level,
-            pix_fmt: s.pix_fmt.clone(),
-            color_primaries: s.color_primaries.clone(),
-            color_transfer: s.color_transfer.clone(),
-            color_space: s.color_space.clone(),
-            color_range: s.color_range.clone(),
-        })
-        .collect();
-
-    let audio_tracks: Vec<AudioTrack> = probe
-        .audio_streams()
-        .map(|s| AudioTrack {
-            index: s.index,
-            codec: s.codec_name.clone(),
-            codec_string: audio_codec_string(s),
-            channels: s.channels,
-            channel_layout: s.channel_layout.clone(),
-            sample_rate: s.sample_rate.as_deref().and_then(|s| s.parse().ok()),
-            language: s.tags.as_ref().and_then(|t| t.get("language").cloned()),
-        })
-        .collect();
-
-    let subtitle_tracks: Vec<SubtitleTrack> = probe
-        .subtitle_streams()
-        .map(|s| {
-            let codec = s.codec_name.clone();
-            let format = match codec.as_deref() {
-                Some("subrip" | "ass" | "ssa" | "mov_text" | "webvtt") => SubFormat::Text,
-                _ => SubFormat::Image,
-            };
-            SubtitleTrack {
-                index: s.index,
-                codec,
-                language: s.tags.as_ref().and_then(|t| t.get("language").cloned()),
-                format,
-            }
-        })
-        .collect();
 
     let sidecars: Vec<SidecarEntry> = f
         .sidecars
@@ -186,12 +76,7 @@ pub async fn manifest(
     Json(ManifestResponse {
         path: vp,
         size: f.size,
-        duration: probe.duration_secs(),
-        container: probe.format.format_name.clone(),
         raw_url,
-        video_tracks,
-        audio_tracks,
-        subtitle_tracks,
         sidecars,
     })
     .into_response()

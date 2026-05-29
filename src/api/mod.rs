@@ -8,10 +8,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::Cli;
 use crate::library::Library;
-use crate::probe::ProbeCache;
 
 pub mod browse;
-pub mod codec_string;
 pub mod debug;
 pub mod flatten;
 pub mod manifest;
@@ -27,7 +25,6 @@ pub mod web;
 #[derive(Clone)]
 pub struct AppState {
     pub library: Library,
-    pub probe: Arc<ProbeCache>,
     pub cfg: Arc<Cli>,
 }
 
