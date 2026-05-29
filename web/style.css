@@ -82,6 +82,35 @@ header {
     gap: 0.5rem;
     margin-left: auto;
 }
+
+/* Always-visible search box. Sits between the crumbs and the right-hand
+ * actions; typing live-navigates to the #/search/<query> route. */
+#search-box {
+    flex-shrink: 0;
+    width: 14rem;
+    max-width: 32vw;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--fg);
+    font-size: 0.9rem;
+    padding: 0.35rem 0.85rem;
+    outline: none;
+    transition:
+        border-color 0.12s ease,
+        width 0.18s ease;
+}
+#search-box::placeholder {
+    color: var(--muted);
+}
+#search-box:focus {
+    border-color: var(--accent);
+    width: 18rem;
+}
+
+.crumb-static {
+    color: var(--muted);
+}
 .sort-toggle {
     display: flex;
     align-items: center;
@@ -116,10 +145,6 @@ header {
     background: var(--accent);
     color: #0a0d12;
     font-weight: 600;
-}
-.sort-pill.selected {
-    outline: 4px solid #ffd24a !important;
-    outline-offset: 2px;
 }
 #crumbs a {
     color: var(--accent);
@@ -260,12 +285,9 @@ main:has(.settings-page) {
         background 0.12s ease,
         border-color 0.12s ease;
 }
-/* Hover and keyboard-selection share one visual: the row I'm pointing at
- * (or that the remote has landed on) IS the row that would activate. No
- * subtler "passive hover" state — couch-first UI only has one notion of
- * "current target." */
-.row-link:hover,
-.row-link.selected {
+/* Hover highlights the row the pointer is on — the row that would activate
+ * on click. */
+.row-link:hover {
     background: var(--accent-soft);
     border-left-color: var(--accent);
 }
@@ -305,13 +327,6 @@ main:has(.settings-page) {
     font-variant-numeric: tabular-nums;
 }
 
-/* The default .selected halo would clip oddly on a row; kill it here and
- * let the rule above do the highlighting via tint + left bar. */
-.row-link.selected {
-    outline: 0 !important;
-    box-shadow: none !important;
-}
-
 /* Continue Watching: a thin progress bar at the bottom of the row, plus a
  * trailing ✕ button for forget-this-position. */
 .col-row-continue .row-link {
@@ -343,15 +358,30 @@ main:has(.settings-page) {
         background 0.12s ease,
         color 0.12s ease;
 }
-/* Destructive action: hover and selection both go red so the keyboard user
- * sees the same "you're about to remove something" warning a mouse user
- * does on hover. */
-.row-action:hover,
-.row-action.selected {
+/* The folder "Binge" action isn't destructive — highlight it in the accent
+ * tint on hover instead of the red remove warning. */
+.row-binge {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+.col-row:hover .row-binge {
+    opacity: 1;
+}
+.row-binge:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+/* No hover on touch devices — keep the affordance permanently visible. */
+@media (hover: none) {
+    .row-binge {
+        opacity: 0.6;
+    }
+}
+/* Destructive action goes red on hover — a "you're about to remove
+ * something" warning. */
+.row-action:hover {
     background: rgba(255, 80, 80, 0.12);
     color: var(--bad);
-    outline: 0 !important;
-    box-shadow: none !important;
 }
 
 @media (max-width: 800px) {
@@ -373,10 +403,8 @@ main:has(.settings-page) {
 }
 
 /* Alphabet rail: a fixed-width column of letters next to the scrollable
- * list. Mouse: click a letter to scroll-jump. LRUD: spatial nav treats each
- * letter button as selectable, so Right from a list row lands on the closest
- * letter; OK fires the same jump as a click. Letters with no matching rows
- * are disabled. */
+ * list. Click a letter to scroll-jump to the first row under it. Letters
+ * with no matching rows are disabled. */
 .alphabet-rail {
     display: flex;
     flex-direction: column;
@@ -414,21 +442,6 @@ main:has(.settings-page) {
 .rail-letter.disabled {
     color: #353a44;
     cursor: default;
-}
-.rail-letter.selected {
-    background: var(--accent);
-    color: #0a0d12;
-    outline: 4px solid #ffd24a !important;
-    outline-offset: 2px;
-}
-/* Selection highlight, applied by the JS spatial-nav code (UIWebView focus
- * rings aren't reliable enough to depend on). List rows provide their own
- * .selected styling that overrides this with !important; this is the
- * fallback for buttons / pills / rail letters / etc. */
-.selected {
-    outline: 4px solid #ffd24a !important;
-    outline-offset: 4px;
-    box-shadow: 0 0 0 8px rgba(255, 210, 74, 0.25);
 }
 
 .badge {
@@ -733,9 +746,6 @@ details pre {
 .settings-link:hover {
     color: var(--accent);
 }
-.settings-link.selected {
-    color: var(--accent);
-}
 
 .settings-page {
     max-width: 720px;
@@ -796,14 +806,10 @@ details pre {
     opacity: 0.4;
     cursor: not-allowed;
 }
-.settings-action.selected {
-    background: var(--accent);
-    color: #0a0d12;
-}
 
 /* End-of-video "Continue" button — appears as a centered card on the stage
- * after `ended` fires. LRUD-selectable by default; mouse-clickable; no
- * countdown / auto-play. */
+ * after `ended` fires. Focused on appear (Enter activates); mouse-clickable;
+ * no countdown / auto-play. */
 .continue-next {
     position: absolute;
     inset: 0;
@@ -853,6 +859,104 @@ details pre {
     font-weight: 600;
     font-size: 1.45rem;
     word-break: break-word;
+}
+
+/* Binge chooser: full-area centered card asking whether to attach this
+ * playback to a binge or just play it. */
+.chooser {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+}
+.chooser-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    text-align: center;
+    max-width: 640px;
+    width: 100%;
+}
+.chooser-icon {
+    font-size: 3rem;
+    line-height: 1;
+}
+.chooser-title {
+    margin: 0;
+    font-size: 1.8rem;
+    font-weight: 700;
+}
+.chooser-sub {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-bottom: 0.8rem;
+}
+.chooser-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    width: 100%;
+    align-items: stretch;
+}
+.chooser-binge,
+.chooser-plain {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.1rem 1.5rem;
+    cursor: pointer;
+    font-size: 1.05rem;
+    text-align: left;
+    transition:
+        background 0.12s ease,
+        border-color 0.12s ease;
+}
+.chooser-binge {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+.chooser-binge:hover,
+.chooser-plain:hover {
+    background: var(--panel-2);
+    border-color: var(--accent);
+}
+.chooser-binge-arrow {
+    color: var(--accent);
+    font-size: 1.6rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.chooser-binge-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.chooser-binge-label {
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.chooser-binge-origin {
+    font-weight: 600;
+    font-size: 1.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    text-align: left;
+}
+.chooser-binge-remaining {
+    color: var(--accent);
+    font-size: 0.85rem;
+}
+.chooser-plain {
+    text-align: center;
+    color: var(--muted);
 }
 
 /* Custom subtitle layer. Anchored to the stage so it sits in the

@@ -92,6 +92,120 @@ function getResume(path) {
     return readResumeMap()[path] || null
 }
 
+// Per-video track preferences. Map of vpath -> {audio, sub}. `audio` is the
+// 0-based ordinal into the manifest's audio_tracks; `sub` is the web subtitle
+// value string ("" for Off, "sidecar:N" for a sidecar). Remembered so the
+// next play of the same file restores the user's last audio/subtitle choice,
+// mirroring the tvOS TrackPrefsStore.
+const TRACKPREFS_KEY = "duplex.trackPrefs"
+
+function readTrackPrefsMap() {
+    try {
+        return JSON.parse(localStorage.getItem(TRACKPREFS_KEY) || "{}") || {}
+    } catch {
+        return {}
+    }
+}
+function writeTrackPrefsMap(m) {
+    try {
+        localStorage.setItem(TRACKPREFS_KEY, JSON.stringify(m))
+    } catch (e) {
+        console.warn("[trackPrefs] write failed", e)
+    }
+}
+function getTrackPrefs(path) {
+    return readTrackPrefsMap()[path] || null
+}
+function setTrackPref(path, key, value) {
+    if (!path) return
+    const m = readTrackPrefsMap()
+    const prefs = m[path] || {}
+    prefs[key] = value
+    m[path] = prefs
+    writeTrackPrefsMap(m)
+}
+
+// Binges. An explicit, ordered watch-queue the user creates from a folder:
+// a flattened list of video vpaths played in sequence. `vpaths[0]` is always
+// "what plays next"; finishing a video pops it, and an empty queue deletes
+// the binge. Persisted under `duplex.binges`, mirroring the tvOS BingeStore.
+const BINGES_KEY = "duplex.binges"
+
+function newId() {
+    // crypto.randomUUID needs a secure context (https/localhost); Duplex is
+    // often served over plain http on a LAN, so fall back to a cheap unique id.
+    return crypto?.randomUUID?.() ?? Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+function readBinges() {
+    try {
+        const v = JSON.parse(localStorage.getItem(BINGES_KEY) || "[]")
+        return Array.isArray(v) ? v : []
+    } catch {
+        return []
+    }
+}
+function writeBinges(arr) {
+    try {
+        localStorage.setItem(BINGES_KEY, JSON.stringify(arr))
+    } catch (e) {
+        console.warn("[binge] write failed", e)
+    }
+}
+// Newest first.
+function bingesOrdered() {
+    return readBinges().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+}
+function bingeById(id) {
+    return readBinges().find((b) => b.id === id) || null
+}
+// Every binge whose next-up video is exactly `vpath` — powers the chooser
+// interception when a binge's front is played from somewhere else.
+function bingesWithFront(vpath) {
+    return readBinges().filter((b) => b.vpaths?.[0] === vpath)
+}
+function createBinge(origin, vpaths) {
+    if (!vpaths || vpaths.length === 0) return null
+    const binge = { id: newId(), origin, vpaths, createdAt: Date.now() }
+    const all = readBinges()
+    all.push(binge)
+    writeBinges(all)
+    console.log(`[binge] created ${binge.id} origin=${origin} count=${vpaths.length}`)
+    return binge
+}
+// Advance a binge past `vpath`, but only while `vpath` is still its front —
+// idempotent, so the natural-end and back-out callers can't double-pop.
+// Removes the binge once its queue empties.
+function popBingeFrontIfMatches(id, vpath) {
+    const all = readBinges()
+    const idx = all.findIndex((b) => b.id === id)
+    if (idx < 0 || all[idx].vpaths?.[0] !== vpath) return
+    all[idx].vpaths.shift()
+    if (all[idx].vpaths.length === 0) {
+        console.log(`[binge] exhausted ${id} — removing`)
+        all.splice(idx, 1)
+    } else {
+        console.log(`[binge] popped ${id}, now front=${all[idx].vpaths[0]} remaining=${all[idx].vpaths.length}`)
+    }
+    writeBinges(all)
+}
+function removeBinge(id) {
+    const all = readBinges().filter((b) => b.id !== id)
+    writeBinges(all)
+    console.log(`[binge] deleted ${id}`)
+}
+
+// Advance the bound binge when the video is effectively done. `finished` is
+// true on a natural end; on back-out we apply the "≥95% watched" rule against
+// the last known position. No-op when playback isn't bound to a binge.
+function maybeAdvanceBinge({ bingeId, path, finished, video }) {
+    if (!bingeId) return
+    const dur = video?.duration
+    const pos = video?.currentTime
+    const watchedEnough = finished || (isFinite(dur) && dur > 0 && isFinite(pos) && pos >= dur * 0.95)
+    if (!watchedEnough) return
+    popBingeFrontIfMatches(bingeId, path)
+}
+
 // Diagnostic: probe localStorage durability across app relaunches.
 // Logs what we read on this launch, then stamps a fresh value so the next
 // launch can verify persistence. Safe to leave in; cheap and informative.
@@ -121,11 +235,23 @@ function encodePath(p) {
 function parseRoute() {
     const h = location.hash.replace(/^#/, "") || "/browse/"
     if (h === "/settings" || h === "/settings/") return { kind: "settings", path: "" }
+    // Search query is a single whole-string-encoded segment (may contain "/").
+    const sm = h.match(/^\/search\/(.*)$/)
+    if (sm) return { kind: "search", query: decodeURIComponent(sm[1] || "") }
     const m = h.match(/^\/(browse|play)\/(.*)$/)
     if (!m) return { kind: "browse", path: "" }
-    const rawPath = m[2] || ""
-    const path = rawPath.split("/").map(decodeURIComponent).filter(Boolean).join("/")
-    return { kind: m[1], path }
+    let rest = m[2] || ""
+    // Optional query suffix on the play route carries the binge binding:
+    //   #/play/<path>?binge=<id>   — finishing advances that binge
+    //   #/play/<path>?binge=none   — explicitly "just play it" (skip chooser)
+    let bingeId = null
+    const qIdx = rest.indexOf("?")
+    if (qIdx >= 0) {
+        bingeId = new URLSearchParams(rest.slice(qIdx + 1)).get("binge")
+        rest = rest.slice(0, qIdx)
+    }
+    const path = rest.split("/").map(decodeURIComponent).filter(Boolean).join("/")
+    return { kind: m[1], path, bingeId }
 }
 
 function renderCrumbs(path, clickable) {
@@ -241,15 +367,13 @@ function renderRoot(data) {
     columns.append(recentCol)
     fetchAndPopulateRecent(recentCol)
 
-    // Continue Watching is always rendered (even when empty) so deleting the
-    // last entry doesn't reflow the other two columns. The empty state
-    // doubles as discovery: new users learn what the column is for.
+    // Binges and Continue Watching are always rendered (even when empty) so
+    // deleting the last entry doesn't reflow the other columns. The empty
+    // states double as discovery.
+    columns.append(renderBingesColumn())
     columns.append(renderContinueColumn())
 
     app.replaceChildren(columns)
-
-    const firstLibRow = columns.querySelector(".col-libraries .col-row")
-    if (firstLibRow) setSelection(firstLibRow.querySelector(".row-link") || firstLibRow)
 }
 
 // Subdir view: one full-width column with the directory listing + alphabet
@@ -276,35 +400,6 @@ function renderSubdir(path, data) {
 
     const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
     app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
-
-    list.addEventListener("click", (ev) => {
-        const row = ev.target.closest(".col-row")
-        if (!row) return
-        try {
-            localStorage.setItem("duplex.last:" + path, row.dataset.name)
-        } catch (e) {
-            void e
-        }
-    })
-    try {
-        const lastName = localStorage.getItem("duplex.last:" + path)
-        let selected = false
-        if (lastName) {
-            for (const r of list.querySelectorAll(".col-row")) {
-                if (r.dataset.name === lastName) {
-                    setSelection(r.querySelector(".row-link") || r)
-                    selected = true
-                    break
-                }
-            }
-        }
-        if (!selected) {
-            const firstRow = list.querySelector(".col-row")
-            if (firstRow) setSelection(firstRow.querySelector(".row-link") || firstRow)
-        }
-    } catch (e) {
-        void e
-    }
 }
 
 function folderFirst(a, b) {
@@ -346,8 +441,46 @@ function makeBrowseRow(entry, vpath) {
         el("div", { className: "row-text" }, name, meta)
     )
     const row = el("li", { className: "col-row" }, link)
+    if (isDir) row.append(bingeButton(vpath))
     row.dataset.name = entry.name
     return row
+}
+
+// Trailing "🍿" action on a folder row — the mouse analog of tvOS's hold-✓.
+// Flattens the folder server-side, confirms, and creates a binge.
+function bingeButton(vpath) {
+    const btn = el(
+        "button",
+        { className: "row-action row-binge", type: "button", title: "Binge this folder", "aria-label": "Binge this folder" },
+        "🍿"
+    )
+    btn.addEventListener("click", (ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        startBinge(vpath)
+    })
+    return btn
+}
+
+// Flatten `originVpath`, confirm, and create a binge. Re-renders the root so
+// the new binge appears when the user is creating from the Libraries column.
+async function startBinge(originVpath) {
+    let data
+    try {
+        data = await getJSON("/api/flatten?path=" + encodeURIComponent(originVpath))
+    } catch (e) {
+        alert("Couldn't build binge: " + e.message)
+        return
+    }
+    const vpaths = data.vpaths || []
+    if (vpaths.length === 0) {
+        alert(`There are no videos in ${basenameOf(originVpath)}.`)
+        return
+    }
+    if (!confirm(`Binge “${data.origin}”?\n${vpaths.length} ${vpaths.length === 1 ? "video" : "videos"} will be queued.`)) return
+    createBinge(data.origin, vpaths)
+    const r = parseRoute()
+    if (r.kind === "browse" && r.path === "") render()
 }
 
 // "Continue Watching" column: vertical list of rows, each with a small
@@ -375,15 +508,6 @@ function renderContinueColumn() {
     const rebuild = () => {
         const fresh = renderContinueColumn()
         section.replaceWith(fresh)
-        const firstItem = fresh.querySelector(".row-link")
-        if (firstItem) {
-            setSelection(firstItem)
-        } else {
-            // Column is now empty; move focus over to the next column so
-            // the user isn't left without a target.
-            const next = document.querySelector(".col-recent .row-link, .col-libraries .row-link")
-            if (next) setSelection(next)
-        }
     }
 
     for (const it of items) {
@@ -467,9 +591,124 @@ async function fetchAndPopulateRecent(col) {
             )
         )
         const row = el("li", { className: "col-row" }, link)
+        if (isDir) row.append(bingeButton(it.vpath))
         row.dataset.name = basename
         list.append(row)
     }
+}
+
+// "Binges" column: each binge shows its origin, next-up video, and remaining
+// count; clicking plays the front bound to the binge so finishing it advances
+// the queue. A trailing ✕ deletes the binge (with confirm). Always rendered,
+// even when empty, so deleting the last one doesn't reflow the root columns.
+function renderBingesColumn() {
+    const binges = bingesOrdered()
+    const list = el("ul", { className: "col-list" })
+    const section = el("section", { className: "col col-binges" }, columnHeader("Binges"), list)
+
+    if (binges.length === 0) {
+        list.append(
+            el(
+                "li",
+                { className: "col-empty-state" },
+                el("div", { className: "empty-state-icon" }, "🍿"),
+                el("div", { className: "empty-state-title" }, "No binges yet"),
+                el("div", { className: "empty-state-hint" }, "Hit 🍿 on a folder to queue everything in it")
+            )
+        )
+        return section
+    }
+
+    const rebuild = () => section.replaceWith(renderBingesColumn())
+
+    for (const b of binges) {
+        const front = b.vpaths[0]
+        const leaf = front ? front.split("/").pop() : ""
+        const link = el(
+            "a",
+            { className: "row-link row-file", href: "#/play/" + encodePath(front) + "?binge=" + encodeURIComponent(b.id) },
+            el("span", { className: "row-icon" }, "🍿"),
+            el(
+                "div",
+                { className: "row-text" },
+                el("div", { className: "row-context" }, b.origin),
+                el("div", { className: "row-name" }, displayName(leaf)),
+                el("div", { className: "row-meta" }, `${b.vpaths.length} remaining`)
+            )
+        )
+        const removeBtn = el(
+            "button",
+            { className: "row-action", type: "button", title: "Delete this binge", "aria-label": "Delete binge" },
+            "✕"
+        )
+        removeBtn.addEventListener("click", (ev) => {
+            ev.preventDefault()
+            ev.stopPropagation()
+            if (!confirm(`Delete this binge?\n${b.origin}\n${b.vpaths.length} remaining. This can't be undone.`)) return
+            removeBinge(b.id)
+            rebuild()
+        })
+        const row = el("li", { className: "col-row col-row-continue" }, link, removeBtn)
+        row.dataset.name = leaf
+        list.append(row)
+    }
+    return section
+}
+
+// Shown when a video is played outside a binge but happens to be the next-up
+// video of one or more binges: attach this playback to a binge (so finishing
+// advances the queue) or play it unattached. Mirrors the tvOS BingeChooserView.
+function renderBingeChooser(path) {
+    document.documentElement.classList.remove("player-active")
+    clearHeaderActions()
+    renderCrumbs(path, "dirs")
+    const matches = bingesWithFront(path)
+    if (matches.length === 0) {
+        // Raced away under us — just play it.
+        location.replace("#/play/" + encodePath(path) + "?binge=none")
+        return
+    }
+    const leaf = displayName(path.split("/").pop() || path)
+    const buttons = matches.map((b) =>
+        el(
+            "button",
+            {
+                className: "chooser-binge",
+                type: "button",
+                onclick: () => {
+                    location.hash = "#/play/" + encodePath(path) + "?binge=" + encodeURIComponent(b.id)
+                }
+            },
+            el("span", { className: "chooser-binge-arrow" }, "▶"),
+            el(
+                "div",
+                { className: "chooser-binge-meta" },
+                el("div", { className: "chooser-binge-label" }, "Continue binge"),
+                el("div", { className: "chooser-binge-origin" }, b.origin),
+                el("div", { className: "chooser-binge-remaining" }, `${b.vpaths.length} remaining`)
+            )
+        )
+    )
+    const playPlain = el(
+        "button",
+        {
+            className: "chooser-plain",
+            type: "button",
+            onclick: () => {
+                location.hash = "#/play/" + encodePath(path) + "?binge=none"
+            }
+        },
+        "This isn’t part of a binge — just play it"
+    )
+    const card = el(
+        "div",
+        { className: "chooser-card" },
+        el("div", { className: "chooser-icon" }, "🍿"),
+        el("h1", { className: "chooser-title" }, "Continue a binge?"),
+        el("div", { className: "chooser-sub" }, leaf),
+        el("div", { className: "chooser-actions" }, ...buttons, playPlain)
+    )
+    app.replaceChildren(el("div", { className: "chooser" }, card))
 }
 
 function renderLibrariesColumn(data) {
@@ -499,17 +738,6 @@ function buildAlphabetRail(entries, list) {
         const rows = list.querySelectorAll(".col-row")
         for (const r of rows) {
             if (firstLetterBucket(r.dataset.name) === letter) {
-                const link = r.querySelector(".row-link")
-                // Apply selection class directly rather than going through
-                // setSelection — its scroll helper only scrolls when the
-                // target is off-screen, but a letter-jump should always put
-                // the first matching row in the middle of the visible list,
-                // even when it happened to already be partially in view.
-                if (link) {
-                    const prev = currentSelection()
-                    if (prev && prev !== link) prev.classList.remove("selected")
-                    link.classList.add("selected")
-                }
                 r.scrollIntoView({ block: "center", behavior: "smooth" })
                 return
             }
@@ -556,8 +784,21 @@ function prettySize(n) {
 }
 
 let activeVideo = null
+// What's currently playing, for the binge back-out rule. Set in renderPlay.
+let activePlay = null
 
 function teardownPlayer() {
+    // Back-out path for the binge rule: if the user leaves with ≥95% watched,
+    // advance the binge here (idempotent with the natural-end pop). Must run
+    // before dispose() while the controller's position is still valid.
+    if (activePlay) {
+        try {
+            maybeAdvanceBinge({ ...activePlay, finished: false })
+        } catch (e) {
+            console.warn("[binge] back-out advance threw", e)
+        }
+        activePlay = null
+    }
     // The WebCodecs player owns its decoders, Mediabunny input, AudioContext,
     // and canvas — disposing the controller releases all of it. Synchronous
     // from the caller's perspective; the underlying close()s are best-effort
@@ -574,17 +815,21 @@ function teardownPlayer() {
     window.duplexPlayer = null
 }
 
-// Couch-first remote handler. Always installed in the player view; the
-// browser experience uses the exact same key model (it also still responds
-// to mouse / spacebar / hover via attachPlayerControls). Layout:
-//   • OK / Space / Enter → play/pause (unless something more specific is selected)
-//   • Left / Right       → seek ±10s
-//   • Up                 → subtitle picker
-//   • Down               → audio picker (falls back to subs if single track)
-//   • Escape (= Menu)    → close picker if open, else back to browse
-function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPicker }) {
+// Desktop keyboard shortcuts for the player. The video is mouse-driven
+// (controls bar, scrub, click-to-pause), but these keys mirror what every
+// other web player offers:
+//   • Space / Enter → play/pause
+//   • Left / Right  → seek ±10s
+//   • Escape        → back to browse
+// Subtitle / audio pickers are click-only (the CC / ♪ buttons in the OSD).
+function installPlayerKeyHandler({ video, stage }) {
     const SEEK_SECONDS = 10
     const showOSD = stage.__duplexShowOSD
+
+    const back = () => {
+        if (history.length > 1) history.back()
+        else location.hash = "#/browse/"
+    }
 
     const seek = (delta) => {
         const dur = isFinite(video.duration) ? video.duration : Infinity
@@ -601,18 +846,10 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
 
     const handleKey = (ev) => {
         const k = ev.key
-        // When the end-of-video "Continue" overlay is showing, it owns
-        // every relevant key. The button is the only meaningful target, so
-        // any LRUD press snaps selection back to it (defends against the
-        // OSD auto-hide clearing selection, or spatial nav drifting off to
-        // the back/play buttons with no neighbour to come back through).
+        // While the end-of-video "Continue" overlay is up, the focused anchor
+        // owns Enter/Space (native navigation); Escape still backs out.
         const continueBtn = stage.querySelector(".continue-next-btn")
         if (continueBtn) {
-            if (k === "ArrowUp" || k === "ArrowDown" || k === "ArrowLeft" || k === "ArrowRight") {
-                ev.preventDefault()
-                setSelection(continueBtn)
-                return true
-            }
             if (k === "Enter" || k === " ") {
                 ev.preventDefault()
                 continueBtn.click()
@@ -620,8 +857,7 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
             }
             if (k === "Escape") {
                 ev.preventDefault()
-                if (history.length > 1) history.back()
-                else location.hash = "#/browse/"
+                back()
                 return true
             }
             return false
@@ -638,27 +874,112 @@ function installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPic
             showOSD()
             return true
         }
-        if (k === "ArrowUp") {
-            ev.preventDefault()
-            openSubsPicker()
-            return true
-        }
-        if (k === "ArrowDown") {
-            ev.preventDefault()
-            openAudioPicker()
-            return true
-        }
         if (k === "Escape") {
             ev.preventDefault()
             console.log("[player] Escape -> back to browse")
-            if (history.length > 1) history.back()
-            else location.hash = "#/browse/"
+            back()
             return true
         }
         return false
     }
 
     window.duplexPlayer = { handleKey, teardown: () => {} }
+}
+
+// One result row for search (and reused shape as Recently Added): a parent
+// context line above the name so identically-named episodes are
+// distinguishable.
+function makeResultRow(item) {
+    const parts = item.vpath.split("/")
+    const basename = parts.pop()
+    const parent = parts.join(" / ")
+    const isDir = item.kind === "dir"
+    const href = (isDir ? "#/browse/" : "#/play/") + encodePath(item.vpath)
+    const metaLeft = isDir ? `${item.children} ${item.children === 1 ? "entry" : "entries"}` : prettySize(item.size)
+    const link = el(
+        "a",
+        { className: "row-link " + (isDir ? "row-dir" : "row-file"), href },
+        el("span", { className: "row-icon" }, isDir ? "📁" : "🎬"),
+        el(
+            "div",
+            { className: "row-text" },
+            parent ? el("div", { className: "row-context" }, parent) : null,
+            el("div", { className: "row-name" }, isDir ? basename : displayName(basename)),
+            el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(item.mtime)}`)
+        )
+    )
+    const row = el("li", { className: "col-row" }, link)
+    row.dataset.name = basename
+    return row
+}
+
+async function renderSearch(query) {
+    document.documentElement.classList.remove("player-active")
+    clearHeaderActions()
+    crumbs.replaceChildren()
+    const q = (query || "").trim()
+    crumbs.append(el("span", { className: "crumb-static" }, q ? `Search: “${q}”` : "Search"))
+    if (!q) {
+        app.replaceChildren(el("p", { className: "muted" }, "Type to search your libraries."))
+        return
+    }
+    app.replaceChildren(el("p", { className: "muted" }, "searching…"))
+    let data
+    try {
+        data = await getJSON("/api/search?q=" + encodeURIComponent(q) + "&limit=50")
+    } catch (e) {
+        app.replaceChildren(el("div", { className: "error" }, "search failed: " + e.message))
+        return
+    }
+    const items = data.items || []
+    const list = el("ul", { className: "col-list" })
+    if (items.length === 0) {
+        list.append(el("li", { className: "col-empty" }, "No results"))
+    } else {
+        for (const item of items) list.append(makeResultRow(item))
+    }
+    const col = el(
+        "section",
+        { className: "col col-subdir" },
+        columnHeader(`Results for “${q}”`),
+        el("div", { className: "col-body" }, list)
+    )
+    app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+}
+
+// Keep the always-visible header search box in sync with the route. Skipped
+// while the user is actively typing (the box is the source of truth then).
+function syncSearchBox() {
+    const box = document.getElementById("search-box")
+    if (!box) return
+    const r = parseRoute()
+    const q = r.kind === "search" ? r.query : ""
+    if (document.activeElement !== box && box.value !== q) box.value = q
+}
+
+// Debounced navigation as the user types. Editing within an existing search
+// replaces the history entry so Back doesn't step through every keystroke;
+// the first keystroke from another view pushes one entry so Back returns
+// there. Clearing the box returns to the browse root.
+function wireSearchBox() {
+    const box = document.getElementById("search-box")
+    if (!box) return
+    let timer = null
+    const go = () => {
+        const q = box.value.trim()
+        const target = q ? "#/search/" + encodeURIComponent(q) : "#/browse/"
+        if (location.hash === target) return
+        if (parseRoute().kind === "search") {
+            history.replaceState(null, "", target)
+            render()
+        } else {
+            location.hash = target
+        }
+    }
+    box.addEventListener("input", () => {
+        clearTimeout(timer)
+        timer = setTimeout(go, 220)
+    })
 }
 
 function renderSettings() {
@@ -673,18 +994,6 @@ function renderSettings() {
     crumbs.appendChild(span)
 
     const positionsCount = Object.keys(readResumeMap()).length
-    const lastKeysCount = (() => {
-        try {
-            let n = 0
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i)
-                if (k && k.startsWith("duplex.last:")) n++
-            }
-            return n
-        } catch {
-            return 0
-        }
-    })()
 
     const positionsRow = settingsRow(
         "Resume positions",
@@ -701,32 +1010,28 @@ function renderSettings() {
         },
         positionsCount === 0
     )
-    const selectionsRow = settingsRow(
-        "Remembered selections",
-        `${lastKeysCount} directories`,
+    const trackPrefsCount = Object.keys(readTrackPrefsMap()).length
+    const trackPrefsRow = settingsRow(
+        "Track preferences",
+        `${trackPrefsCount} remembered`,
         "Forget all",
         () => {
-            if (!confirm(`Forget remembered selection in ${lastKeysCount} directories?`)) return
+            if (!confirm(`Forget audio/subtitle preferences for ${trackPrefsCount} videos?`)) return
             try {
-                const toRemove = []
-                for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i)
-                    if (k && k.startsWith("duplex.last:")) toRemove.push(k)
-                }
-                for (const k of toRemove) localStorage.removeItem(k)
+                localStorage.removeItem(TRACKPREFS_KEY)
             } catch (e) {
-                console.warn("[settings] failed to clear selections", e)
+                console.warn("[settings] failed to clear track prefs", e)
             }
             render()
         },
-        lastKeysCount === 0
+        trackPrefsCount === 0
     )
 
     const page = el(
         "div",
         { className: "settings-page" },
         el("h1", { className: "settings-title" }, "Settings"),
-        el("div", { className: "settings-list" }, positionsRow, selectionsRow)
+        el("div", { className: "settings-list" }, positionsRow, trackPrefsRow)
     )
     app.replaceChildren(page)
 }
@@ -747,7 +1052,7 @@ function settingsRow(title, status, actionLabel, onClick, disabled) {
     )
 }
 
-async function renderPlay(path) {
+async function renderPlay(path, bingeId = null) {
     teardownPlayer()
     clearHeaderActions()
     document.documentElement.classList.add("player-active")
@@ -814,7 +1119,13 @@ async function renderPlay(path) {
             }
         })
     )
+    const savedPrefs = getTrackPrefs(path)
     const initialAudioOrd = (() => {
+        // A remembered, still-decodable choice wins over the heuristic.
+        const savedAudio = savedPrefs?.audio
+        if (Number.isInteger(savedAudio) && savedAudio >= 0 && savedAudio < audioTracks.length && audioSupport[savedAudio]) {
+            return savedAudio
+        }
         const isEng = (a) => {
             const lang = (a.language || "").toLowerCase()
             return lang === "en" || lang.startsWith("en-") || lang === "eng"
@@ -967,6 +1278,7 @@ async function renderPlay(path) {
     }
     const video = controller
     activeVideo = controller
+    activePlay = { path, bingeId, video: controller }
 
     // Tap-to-play overlay. Chrome (and Safari, sometimes) gate
     // `AudioContext.resume()` behind a user gesture, so a deep link or a
@@ -1163,6 +1475,8 @@ async function renderPlay(path) {
         cueGen++
         const gen = cueGen
         currentSubValue = value
+        // Remember the user's subtitle intent for next time (including "Off").
+        setTrackPref(path, "sub", value)
         const label = value ? labelFor(subOptions, value) : "Off"
         subBtn.textContent = "CC " + label
         activeCues = []
@@ -1228,6 +1542,7 @@ async function renderPlay(path) {
         console.log(`[audio] switching ${prev} -> ${audioIdx}`)
         try {
             await controller.switchAudio(audioIdx)
+            setTrackPref(path, "audio", audioIdx)
         } catch (e) {
             console.warn("[audio] switch failed", e)
             // Revert label so the picker reflects reality.
@@ -1274,14 +1589,20 @@ async function renderPlay(path) {
     subBtn.addEventListener("click", openSubsPicker)
     if (audioBtn) audioBtn.addEventListener("click", openAudioPicker)
 
+    // Restore the remembered subtitle choice (audio is applied at boot via
+    // startAudioOrd above). Only if the saved value still maps to a real
+    // option for this file; "" (Off) is the default so we skip it.
+    if (savedPrefs?.sub && subOptions.some((o) => o.value === savedPrefs.sub)) {
+        applySubChoice(savedPrefs.sub)
+    }
+
     video.volume = initVolume
     video.muted = savedMuted
-    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path })
-    // One UI everywhere — couch-first. Arrow keys always seek; Up/Down
-    // always open the sub/audio pickers; OK on the focused element fires
-    // its click. Mouse / hover / wheel still work because the controls are
-    // real elements with their own click handlers.
-    installPlayerRemoteHandler({ video, stage, openSubsPicker, openAudioPicker })
+    attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path, bingeId })
+    // Desktop keyboard shortcuts: Space/Enter play-pause, ←/→ seek, Esc back.
+    // Mouse / hover / wheel still work because the controls are real elements
+    // with their own click handlers.
+    installPlayerKeyHandler({ video, stage })
 }
 
 // Wires every custom control to the <video> element and handles
@@ -1293,20 +1614,34 @@ async function renderPlay(path) {
 // what would play next in the same directory and surface a single
 // "Continue → <name>" button. Lightweight by design: no countdown, no
 // auto-play, no playlist queue — just one click/OK and we navigate.
-async function maybeShowContinueNext({ stage, path }) {
+async function maybeShowContinueNext({ stage, path, bingeId }) {
     if (!path) return
-    let data
-    try {
-        const r = await fetch("/api/next?path=" + encodeURIComponent(path))
-        if (r.status === 404) return
-        if (!r.ok) {
-            console.warn("[next] fetch failed", r.status)
+    let nextVpath, nextName, nextHref
+    if (bingeId) {
+        // The just-finished video was already popped in the `ended` handler,
+        // so the queue's new front IS what plays next. Keep the binge binding.
+        const front = bingeById(bingeId)?.vpaths?.[0]
+        if (!front) return
+        nextVpath = front
+        nextName = displayName(front.split("/").pop() || front)
+        nextHref = "#/play/" + encodePath(front) + "?binge=" + encodeURIComponent(bingeId)
+    } else {
+        let data
+        try {
+            const r = await fetch("/api/next?path=" + encodeURIComponent(path))
+            if (r.status === 404) return
+            if (!r.ok) {
+                console.warn("[next] fetch failed", r.status)
+                return
+            }
+            data = await r.json()
+        } catch (e) {
+            console.warn("[next] fetch threw", e)
             return
         }
-        data = await r.json()
-    } catch (e) {
-        console.warn("[next] fetch threw", e)
-        return
+        nextVpath = data.vpath
+        nextName = data.name
+        nextHref = "#/play/" + encodePath(data.vpath)
     }
     // Already showing one? Replace it (avoid stacking on re-end).
     const old = stage.querySelector(".continue-next")
@@ -1314,24 +1649,24 @@ async function maybeShowContinueNext({ stage, path }) {
 
     const btn = el(
         "a",
-        { className: "continue-next-btn", href: "#/play/" + encodePath(data.vpath) },
+        { className: "continue-next-btn", href: nextHref },
         el("div", { className: "continue-next-arrow" }, "▶"),
         el(
             "div",
             { className: "continue-next-meta" },
             el("div", { className: "continue-next-label" }, "Continue"),
-            el("div", { className: "continue-next-name" }, data.name)
+            el("div", { className: "continue-next-name" }, nextName)
         )
     )
     const overlay = el("div", { className: "continue-next" }, btn)
     stage.append(overlay)
-    // Make sure spatial-nav and the player key handler both pick the button
-    // as the active target; OK/Enter should fire the navigate.
-    setSelection(btn)
-    console.log(`[next] showing Continue → ${data.vpath}`)
+    // Focus the anchor so Enter activates it natively and it's the obvious
+    // target on screen.
+    btn.focus()
+    console.log(`[next] showing Continue → ${nextVpath}`)
 }
 
-function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path }) {
+function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteBtn, volumeSlider, fsBtn, path, bingeId }) {
     let scrubbing = false
     // Resume-position restore happens in startPlayer({ startAt }) — the
     // WebCodecs player needs the start time at boot, not as a post-load seek,
@@ -1355,7 +1690,10 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     }
     video.addEventListener("ended", async () => {
         if (path) clearResume(path)
-        await maybeShowContinueNext({ stage, path })
+        // Natural end ⇒ finished ⇒ advance the bound binge before we ask what's
+        // next, so the Continue button reflects the popped queue.
+        if (bingeId) maybeAdvanceBinge({ bingeId, path, finished: true, video })
+        await maybeShowContinueNext({ stage, path, bingeId })
     })
 
     const updatePlay = () => {
@@ -1429,23 +1767,12 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     video.addEventListener("click", () => {
         video.paused ? video.play() : video.pause()
     })
+    // Space/Enter/arrow/Esc shortcuts live in installPlayerKeyHandler
+    // (window.duplexPlayer), dispatched from the global capture keydown.
 
-    // Spacebar toggles play/pause while the player is in view and a form
-    // control isn't focused.
-    const onKey = (ev) => {
-        if (ev.code !== "Space") return
-        const tag = (document.activeElement?.tagName || "").toLowerCase()
-        if (tag === "input" || tag === "select" || tag === "textarea") return
-        ev.preventDefault()
-        video.paused ? video.play() : video.pause()
-    }
-    document.addEventListener("keydown", onKey)
-
-    // OSD auto-hide. Same policy everywhere: a fixed dwell after the last
-    // input or paint, then dim and drop selection. Mouse moves / hover /
-    // pause / remote presses all re-surface via showControls. The video's
-    // `paused` flag can't be trusted (UIWebView reports stale `true` while
-    // audio/video keep advancing) so the timer fires regardless.
+    // OSD auto-hide: a fixed dwell after the last input or paint, then dim.
+    // Mouse moves / hover / pause / key presses all re-surface via
+    // showControls.
     let hideTimer = null
     const HIDE_MS = 3500
     const showControls = () => {
@@ -1456,17 +1783,6 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
         }
         hideTimer = setTimeout(() => {
             stage.classList.remove("show-controls")
-            // Scope to `stage` — a global `document.querySelector` here
-            // would strip the restored browse selection if the user
-            // Escapes back before this orphan timer fires (teardownPlayer
-            // doesn't clear it).
-            const sel = stage.querySelector(".selected")
-            // Never clear the Continue-next button's selection: it's the
-            // only meaningful target while the end-of-video overlay is up,
-            // and if we drop it the user can press LRUD into the void.
-            if (sel && !sel.classList.contains("continue-next-btn")) {
-                sel.classList.remove("selected")
-            }
         }, HIDE_MS)
     }
     stage.addEventListener("mousemove", showControls)
@@ -1518,58 +1834,19 @@ function render() {
     // routes — teardownPlayer also nulls window.duplexPlayer so leftover
     // key handlers don't keep firing in the next view.
     closeOpenPicker()
-    if (r.kind !== "play") teardownPlayer()
-    if (r.kind === "play") renderPlay(r.path)
-    else if (r.kind === "settings") renderSettings()
+    // Playing a binge's next-up video from outside the binge (library, recent,
+    // search, Continue Watching) routes through the chooser first, unless an
+    // explicit binge binding ("?binge=<id>" or "?binge=none") is already set.
+    const isChooser = r.kind === "play" && !r.bingeId && bingesWithFront(r.path).length > 0
+    if (r.kind !== "play" || isChooser) teardownPlayer()
+    if (r.kind === "play") {
+        if (isChooser) renderBingeChooser(r.path)
+        else renderPlay(r.path, r.bingeId === "none" ? null : r.bingeId)
+    } else if (r.kind === "settings") renderSettings()
+    else if (r.kind === "search") renderSearch(r.query)
     else renderBrowse(r.path)
-    // Intentionally not auto-selecting anything — the spatial-nav highlight
-    // only appears once the user presses an arrow key.
+    syncSearchBox()
 }
-
-// Spatial keyboard navigation for TV-style remotes (Siri Remote, etc.). The
-// tvOS wrapper synthesizes Arrow/Space/Enter KeyboardEvents on document.
-// We can't rely on DOM focus + `:focus` CSS — UIWebView's older WebKit on
-// tvOS does not reliably paint focus rings on anchors. Instead we manage
-// selection ourselves: tag the chosen element with `.selected`, style that
-// class loudly, and on Enter call .click(). Approach borrowed from
-// ~/work/movienight which hit the same wall.
-const SELECTABLE_SELECTOR = [
-    "a[href]",
-    "button:not([disabled])",
-    'input:not([disabled]):not([type="hidden"])',
-    "select:not([disabled])",
-    "textarea:not([disabled])",
-    "[data-selectable]"
-].join(",")
-
-function isVisible(el) {
-    if (!el.isConnected) return false
-    if (!el.offsetParent && getComputedStyle(el).position !== "fixed") return false
-    const r = el.getBoundingClientRect()
-    return r.width > 0 && r.height > 0
-}
-
-function selectables() {
-    return Array.from(document.querySelectorAll(SELECTABLE_SELECTOR)).filter(isVisible)
-}
-
-function currentSelection() {
-    return document.querySelector(".selected")
-}
-
-// One "current target" at a time. After hover and keyboard-selection were
-// merged to the same visual, any mouseover on a selectable element is
-// enough signal that the user has moved their focus away from whatever the
-// keyboard last picked — clear the stale `.selected` so the hover-painted
-// row is the only thing highlighted. Stays a no-op when the mouse hasn't
-// moved since the last render, since mouseover only fires on entry.
-document.addEventListener("mouseover", (ev) => {
-    if (!ev.target.closest?.(SELECTABLE_SELECTOR)) return
-    const sel = currentSelection()
-    if (sel && !sel.matches(":hover")) {
-        sel.classList.remove("selected")
-    }
-})
 
 // Find the nearest ancestor that actually scrolls vertically. Walks up until
 // it hits one with `overflow-y: auto|scroll` and a scrollable amount of
@@ -1604,72 +1881,10 @@ function scrollSelectionIntoView(el) {
     el.scrollIntoView({ block: "center", inline: "nearest" })
 }
 
-function setSelection(el) {
-    const prev = currentSelection()
-    if (prev === el) return
-    if (prev) prev.classList.remove("selected")
-    if (el) {
-        el.classList.add("selected")
-        scrollSelectionIntoView(el)
-        console.log(`[nav] setSelection:`, el)
-    }
-}
-
-function pickNeighbor(dir) {
-    const all = selectables()
-    if (all.length === 0) return null
-    const cur = currentSelection()
-    if (!cur || !all.includes(cur)) return all[0]
-    const sr = cur.getBoundingClientRect()
-    const scx = sr.left + sr.width / 2
-    const scy = sr.top + sr.height / 2
-    let best = null
-    let bestScore = Infinity
-    for (const el of all) {
-        if (el === cur) continue
-        const r = el.getBoundingClientRect()
-        const cx = r.left + r.width / 2
-        const cy = r.top + r.height / 2
-        let primary, perpend
-        if (dir === "down") {
-            if (r.top < sr.bottom - 1) continue
-            primary = cy - scy
-            perpend = cx - scx
-        } else if (dir === "up") {
-            if (r.bottom > sr.top + 1) continue
-            primary = scy - cy
-            perpend = cx - scx
-        } else if (dir === "right") {
-            if (r.left < sr.right - 1) continue
-            primary = cx - scx
-            perpend = cy - scy
-        } else {
-            if (r.right > sr.left + 1) continue
-            primary = scx - cx
-            perpend = cy - scy
-        }
-        if (primary <= 0) continue
-        // Weight perpendicular distance heavily — prefer items in line with
-        // the current selection over closer-but-diagonal ones.
-        const score = primary * primary + 4 * perpend * perpend
-        if (score < bestScore) {
-            bestScore = score
-            best = el
-        }
-    }
-    return best
-}
-
-function moveSelection(dir) {
-    const n = pickNeighbor(dir)
-    if (!n) return false
-    setSelection(n)
-    return true
-}
-
-// Modal list picker for tvOS-style choice screens (subtitle / audio track).
-// Stays open until user picks an item or hits Escape. While open, swallows
-// all relevant keys so neither the player nor spatial-nav reacts.
+// Modal list picker for subtitle / audio track choice. Stays open until the
+// user picks an item or hits Escape; keyboard nav (↑/↓/Enter/Esc) works
+// inside the modal, and clicking an item selects it. While open it swallows
+// all relevant keys so the player doesn't also react.
 function openPicker({ title, options, currentIndex, onSelect, onCancel }) {
     closeOpenPicker()
     if (!options || options.length === 0) return null
@@ -1734,26 +1949,11 @@ function closeOpenPicker() {
     if (window.duplexPicker) window.duplexPicker.close()
 }
 
-const ARROW_DIRS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }
-
-function describeEl(el) {
-    if (!el) return "<none>"
-    const id = el.id ? "#" + el.id : ""
-    const cls =
-        el.className && typeof el.className === "string"
-            ? "." + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join(".")
-            : ""
-    const txt = (el.textContent || "").trim().slice(0, 30)
-    return `<${el.tagName.toLowerCase()}${id}${cls} "${txt}">`
-}
-
 document.addEventListener(
     "keydown",
     (ev) => {
-        // Priority 1: a modal picker is open — it owns every relevant key
-        // until the user picks or cancels. stopImmediatePropagation keeps
-        // bubble-phase listeners (e.g. the legacy Space=play/pause hook in
-        // attachPlayerControls) from acting on the same event.
+        // Priority 1: a modal picker is open — it owns ↑/↓/Enter/Esc until the
+        // user picks or cancels.
         if (window.duplexPicker) {
             if (window.duplexPicker.handleKey(ev)) {
                 ev.preventDefault()
@@ -1761,39 +1961,25 @@ document.addEventListener(
             }
             return
         }
-        // Priority 2: TV-mode player owns its keys (play/pause, seek,
-        // sub/audio pickers, back). Same stop-propagation rationale.
+        // Priority 2: the player owns its keys (play/pause, seek, back).
         if (window.duplexPlayer?.handleKey?.(ev)) {
             ev.stopImmediatePropagation()
             return
         }
-        // Priority 3: spatial navigation in browse view (and the player in
-        // browser mode, where window.duplexPlayer is never installed).
+        // Priority 3: browse / search / settings. Escape backs out — but when
+        // the search box is focused it just blurs (and clears) instead.
         if (ev.key === "Escape") {
+            const active = document.activeElement
+            if (active && active.id === "search-box") {
+                ev.preventDefault()
+                active.value = ""
+                active.blur()
+                if (parseRoute().kind === "search") location.hash = "#/browse/"
+                return
+            }
             ev.preventDefault()
             if (history.length > 1) history.back()
-            else location.reload()
-            return
-        }
-        const dir = ARROW_DIRS[ev.key]
-        if (dir) {
-            const before = describeEl(currentSelection())
-            const moved = moveSelection(dir)
-            const after = describeEl(currentSelection())
-            console.log(`[nav] ${dir} moved=${moved} ${before} -> ${after} (selectables=${selectables().length})`)
-            if (moved) ev.preventDefault()
-            return
-        }
-        if (ev.key === "Enter" || ev.key === " ") {
-            const s = currentSelection()
-            if (!s) return
-            const clickable = s.tagName === "A" || s.tagName === "BUTTON"
-            if (ev.key === " " && !clickable) return
-            console.log(`[nav] ${ev.key === " " ? "Space" : "Enter"} clicking ${describeEl(s)}`)
-            if (typeof s.click === "function") {
-                ev.preventDefault()
-                s.click()
-            }
+            else location.hash = "#/browse/"
         }
     },
     true
@@ -1801,6 +1987,7 @@ document.addEventListener(
 
 window.addEventListener("hashchange", render)
 window.addEventListener("DOMContentLoaded", () => {
+    wireSearchBox()
     if (!location.hash) location.hash = "#/browse/"
     render()
 })
