@@ -146,6 +146,38 @@ header {
     color: #0a0d12;
     font-weight: 600;
 }
+
+/* House Party toggle — header pill mirroring tvOS's Join/Leave row + badge.
+ * Muted outline when idle; fills gold ("you're in the party") when joined,
+ * with the live status (Idle / current video) appended to the label. */
+.houseparty-toggle {
+    flex-shrink: 0;
+    max-width: 22rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0.3rem 0.85rem;
+    cursor: pointer;
+    transition:
+        background 0.12s ease,
+        border-color 0.12s ease,
+        color 0.12s ease;
+}
+.houseparty-toggle:hover {
+    color: var(--fg);
+    border-color: var(--accent);
+}
+.houseparty-toggle.joined {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0a0d12;
+}
 #crumbs a {
     color: var(--accent);
     text-decoration: none;

@@ -206,6 +206,280 @@ function maybeAdvanceBinge({ bingeId, path, finished, video }) {
     popBingeFrontIfMatches(bingeId, path)
 }
 
+// ── House Party ─────────────────────────────────────────────────────────────
+// Web port of the tvOS HousePartyStore + PlayerView fine-sync. The server holds
+// a single shared "fake player" (`/api/houseparty`); any joined client can drive
+// it (becoming the "DJ" by POSTing its playback state) and every joined client
+// polls once a second and mirrors what it finds, so a room watches in lockstep.
+// See src/api/houseparty.rs and tvos/Sources/HouseParty/HousePartyStore.swift.
+//
+// Split of responsibilities mirrors tvOS:
+//   • the store owns polling + nav-level mirroring (start the party's video when
+//     it changes, leave the player when the party goes idle);
+//   • the player wiring (attachPlayer/applyMirror/maybeAnnounce, called from
+//     renderPlay) owns fine-grained sync for the video that's already playing.
+// Feedback loops are avoided by construction: applyMirror only ever drives the
+// player, never broadcasts; broadcasts come exclusively from explicit local-user
+// gestures.
+
+const HOUSE_PARTY_POLL_MS = 1000
+// Local-authority window. After a local action we broadcast it, but the server
+// won't echo it back until the POST lands and the next poll returns (~1s). For
+// that window we ignore incoming poll state, or this client fights its own
+// action — yanking a scrub back to the stale server position, or popping the
+// player on a stale `idle` right after we started one. A follower never calls
+// markLocalAction, so it is never suppressed: "anyone can DJ" is preserved.
+const HOUSE_PARTY_LOCAL_AUTHORITY_MS = 2500
+// Sync-seek damping (mirror direction). 2s tolerance: a seek causes a brief
+// buffer stall that leaves us ~1s behind, so a 1s threshold re-triggers itself;
+// 2s lets steady-state jitter settle while still snapping on a real DJ seek. The
+// 2.5s cooldown stops a still-unreachable target from storming seeks.
+const HOUSE_PARTY_SEEK_TOLERANCE_S = 2
+const HOUSE_PARTY_SEEK_COOLDOWN_MS = 2500
+
+const houseParty = {
+    // Whether this client is participating (mirroring + broadcasting). In-memory
+    // only and always starts false: joining is a deliberate per-session act,
+    // never restored, so a tab shouldn't silently auto-join and start playing
+    // the room's video on load.
+    joined: false,
+    // Most recent poll result: {active, vpath, duration, position, playing}.
+    // `null` until the first successful poll.
+    latest: null,
+    // When the store mirror-starts a video it records that vpath here so the
+    // mounting player knows NOT to re-announce it as a local-user action.
+    suppressAnnounceVpath: null,
+    // performance.now()-based deadline for the local-authority window.
+    suppressMirrorUntil: 0,
+    // The mounted player we're driving: { video, path }. Set by attachPlayer,
+    // cleared by detachPlayer.
+    player: null,
+    _didAnnounce: false,
+    _lastMirrorSeekAt: 0,
+
+    markLocalAction() {
+        this.suppressMirrorUntil = performance.now() + HOUSE_PARTY_LOCAL_AUTHORITY_MS
+    },
+    get mirrorSuppressed() {
+        return performance.now() < this.suppressMirrorUntil
+    },
+
+    // ── join / leave ──
+    join() {
+        if (this.joined) return
+        this.joined = true
+        console.log("[houseparty] joined")
+        notifyHousePartyChanged()
+        this.pollOnce() // mirror immediately instead of waiting up to a second
+    },
+    // Leaving is local-only: it stops us mirroring/broadcasting but does NOT
+    // idle the party for everyone else.
+    leave() {
+        if (!this.joined) return
+        this.joined = false
+        console.log("[houseparty] left")
+        notifyHousePartyChanged()
+    },
+
+    // ── broadcasting (DJ direction) ──
+    broadcast({ path, duration, position, playing }) {
+        if (!this.joined) return
+        this.markLocalAction()
+        console.log(`[houseparty] broadcast vpath=${path} pos=${(position || 0).toFixed(1)} dur=${(duration || 0).toFixed(1)} playing=${playing}`)
+        postHouseParty({ vpath: path, duration: duration || 0, position: position || 0, playing }).catch((e) =>
+            console.warn("[houseparty] broadcast failed", e)
+        )
+    },
+    // Force the party idle (stops the video for the whole room). Used when a
+    // joined user backs out of a video.
+    clear() {
+        if (!this.joined) return
+        this.markLocalAction()
+        console.log("[houseparty] clear -> idle")
+        clearHouseParty().catch((e) => console.warn("[houseparty] clear failed", e))
+    },
+
+    // ── polling ──
+    async pollOnce() {
+        let state
+        try {
+            state = await getHouseParty()
+        } catch {
+            return // transient LAN blip; keep polling
+        }
+        this.latest = state
+        notifyHousePartyChanged()
+        if (this.joined) this.reconcile(state)
+    },
+
+    // Nav-level mirroring: start the party's video when it changes, leave the
+    // player when the party goes idle. Fine-grained play/pause + seek sync for
+    // the already-playing video lives in applyMirror.
+    reconcile(state) {
+        // Don't act on poll state that predates our own just-taken local action.
+        if (this.mirrorSuppressed) return
+        const current = currentPlayerVpath()
+        if (!state.active) {
+            // Party idle → make sure we're not playing anything.
+            if (current != null) location.hash = "#/browse/"
+            return
+        }
+        if (!state.vpath) return
+        if (current === state.vpath) return // already right video — applyMirror handles the rest
+        // Different video (or not in a player) → start the party's. Skip the
+        // binge chooser ("?binge=none") — mirroring is never a binge play — and
+        // flag the announce so the mounting player doesn't re-broadcast it.
+        console.log(`[houseparty] mirror start target=${state.vpath} current=${current ?? "nil"}`)
+        this.suppressAnnounceVpath = state.vpath
+        location.hash = "#/play/" + encodePath(state.vpath) + "?binge=none"
+    },
+
+    // ── player-facing (the PlayerView half) ──
+    attachPlayer(video, path) {
+        this.player = { video, path }
+        this._didAnnounce = false
+        this._lastMirrorSeekAt = 0
+        // A user-initiated start (not a mirror-start, which reconcile flags via
+        // suppressAnnounceVpath) opens the local-authority window now, so a stale
+        // `idle` poll can't pop us before our announce propagates.
+        if (this.joined && this.suppressAnnounceVpath !== path) this.markLocalAction()
+    },
+    detachPlayer() {
+        if (!this.player) return
+        // Back-out detection, timing-free (mirror of PlayerView.onDisappear):
+        // clear the party only when we've actually left to a non-player screen
+        // AND the party is still active.
+        //   • user back-out  → top is browse (currentPlayerVpath == null), party
+        //                       still active → clear (idle the room).
+        //   • mirror swap A→B → top is the NEW player (non-null) → no clear.
+        //   • idle-pop        → party already inactive → no clear.
+        // (Runs from teardownPlayer, after location.hash already reflects the
+        // destination — the same signal tvOS reads in onDisappear.)
+        if (this.joined && currentPlayerVpath() == null && this.latest?.active) {
+            this.clear()
+        }
+        this.player = null
+    },
+
+    // One-shot announce once the video is playing with a known duration — unless
+    // the playback was itself started by mirroring (the DJ already announced it,
+    // flagged via suppressAnnounceVpath). Called from the player's timeupdate.
+    maybeAnnounce() {
+        const p = this.player
+        if (!p || !this.joined || this._didAnnounce) return
+        if (!(p.video.duration > 0) || p.video.paused) return
+        this._didAnnounce = true
+        if (this.suppressAnnounceVpath === p.path) {
+            this.suppressAnnounceVpath = null
+            return
+        }
+        this.broadcast({ path: p.path, duration: p.video.duration, position: p.video.currentTime, playing: true })
+    },
+
+    // Fine-grained mirror (server → local) for the video we're already playing.
+    // Only drives the player; never broadcasts, so it can't echo. Called on each
+    // poll via notifyHousePartyChanged.
+    applyMirror() {
+        const p = this.player
+        if (!p || !this.joined || this.mirrorSuppressed) return
+        const s = this.latest
+        if (!s || !s.active || s.vpath !== p.path || !(p.video.duration > 0)) return
+        if (s.playing && p.video.paused) p.video.play()
+        else if (!s.playing && !p.video.paused) p.video.pause()
+        const now = performance.now()
+        if (
+            Math.abs(s.position - p.video.currentTime) > HOUSE_PARTY_SEEK_TOLERANCE_S &&
+            now - this._lastMirrorSeekAt > HOUSE_PARTY_SEEK_COOLDOWN_MS
+        ) {
+            console.log(`[houseparty] sync seek ${p.video.currentTime.toFixed(1)} -> ${s.position.toFixed(1)}`)
+            p.video.currentTime = s.position
+            this._lastMirrorSeekAt = now
+        }
+    },
+
+    // Local user gestures → broadcast. Called from the player's explicit input
+    // sites (toggle play/pause, committed seek). Never called by applyMirror, so
+    // mirror-applied transitions can't echo back out.
+    noteUserPlayPause(willPlay) {
+        const p = this.player
+        if (!p) return
+        this.broadcast({ path: p.path, duration: p.video.duration, position: p.video.currentTime, playing: willPlay })
+    },
+    noteUserSeek() {
+        const p = this.player
+        if (!p) return
+        this.broadcast({ path: p.path, duration: p.video.duration, position: p.video.currentTime, playing: !p.video.paused })
+    }
+}
+
+// The vpath of the player currently at the top of the route, or null when we're
+// not in a player (browse/search/settings, or the binge chooser). The House
+// Party store uses this to decide whether the party's video is already ours.
+function currentPlayerVpath() {
+    const r = parseRoute()
+    if (r.kind !== "play") return null
+    const isChooser = !r.bingeId && bingesWithFront(r.path).length > 0
+    if (isChooser) return null
+    return r.path
+}
+
+// GET the shared party state. `cache: "no-store"` mirrors the tvOS client's
+// `reloadIgnoringLocalCacheData` so a 1 Hz poll always sees fresh truth.
+async function getHouseParty() {
+    const r = await fetch("/api/houseparty", { cache: "no-store" })
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+    return r.json()
+}
+async function postHouseParty(body) {
+    const r = await fetch("/api/houseparty", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+    })
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+}
+async function clearHouseParty() {
+    const r = await fetch("/api/houseparty", { method: "DELETE" })
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+}
+
+// Called on every state change (poll, join, leave): refresh the header toggle
+// and run the fine-grained player mirror against the freshest poll.
+function notifyHousePartyChanged() {
+    updateHousePartyToggle()
+    houseParty.applyMirror()
+}
+
+// Header pill that joins/leaves and shows live party status — the web analogue
+// of the tvOS HomeView "Join/Leave House Party" row plus the BrowseHeader badge.
+// Created once and toggled; the player-active CSS hides the whole header during
+// playback (matching tvOS, which shows no party chrome over the video).
+function setupHousePartyToggle() {
+    const btn = el("button", { className: "houseparty-toggle", type: "button", title: "House Party — watch in sync" })
+    btn.addEventListener("click", () => {
+        houseParty.joined ? houseParty.leave() : houseParty.join()
+    })
+    const header = document.querySelector("header")
+    const searchBox = document.getElementById("search-box")
+    header.insertBefore(btn, searchBox)
+    houseParty._toggleEl = btn
+    updateHousePartyToggle()
+}
+
+function updateHousePartyToggle() {
+    const btn = houseParty._toggleEl
+    if (!btn) return
+    btn.classList.toggle("joined", houseParty.joined)
+    let status = ""
+    if (houseParty.joined) {
+        const s = houseParty.latest
+        if (!s) status = ""
+        else if (!s.active || !s.vpath) status = " · Idle"
+        else status = " · " + displayName(s.vpath.split("/").pop() || s.vpath)
+    }
+    btn.textContent = (houseParty.joined ? "🎉 House Party" : "🎉 Join House Party") + status
+}
+
 // Diagnostic: probe localStorage durability across app relaunches.
 // Logs what we read on this launch, then stamps a fresh value so the next
 // launch can verify persistence. Safe to leave in; cheap and informative.
@@ -786,6 +1060,9 @@ function teardownPlayer() {
         }
         activePlay = null
     }
+    // House Party: detect a back-out (this runs after location.hash already
+    // reflects the destination) and idle the room if we're the one leaving.
+    houseParty.detachPlayer()
     // The WebCodecs player owns its decoders, Mediabunny input, AudioContext,
     // and canvas — disposing the controller releases all of it. Synchronous
     // from the caller's perspective; the underlying close()s are best-effort
@@ -823,12 +1100,14 @@ function installPlayerKeyHandler({ video, stage }) {
         const before = video.currentTime
         video.currentTime = Math.max(0, Math.min(dur, before + delta))
         console.log(`[player] seek ${delta > 0 ? "+" : ""}${delta}s: ${before.toFixed(2)} -> ${video.currentTime.toFixed(2)}`)
+        houseParty.noteUserSeek()
     }
 
     const togglePlay = () => {
         const wasPaused = video.paused
         wasPaused ? video.play() : video.pause()
         console.log(`[player] toggle play: paused ${wasPaused} -> ${!wasPaused} at t=${video.currentTime.toFixed(2)}`)
+        houseParty.noteUserPlayPause(wasPaused)
     }
 
     const handleKey = (ev) => {
@@ -1264,7 +1543,9 @@ async function renderPlay(path, bingeId = null) {
         // Click-to-play needs a real DOM target since the controller isn't
         // in the DOM.
         host.addEventListener("click", () => {
-            controller.paused ? controller.play() : controller.pause()
+            const willPlay = controller.paused
+            willPlay ? controller.play() : controller.pause()
+            houseParty.noteUserPlayPause(willPlay)
         })
         // Kick playback. play() no longer awaits the resume — Chrome's
         // autoplay policy can hang that promise indefinitely if no gesture
@@ -1279,6 +1560,12 @@ async function renderPlay(path, bingeId = null) {
     const video = controller
     activeVideo = controller
     activePlay = { path, bingeId, video: controller }
+
+    // House Party: register this player so the store can fine-sync it (play/
+    // pause + seek mirroring) and so backing out clears the room. The one-shot
+    // "I started a video" announce fires from timeupdate once we have a duration.
+    houseParty.attachPlayer(video, path)
+    video.addEventListener("timeupdate", () => houseParty.maybeAnnounce())
 
     // Tap-to-play overlay. Chrome (and Safari, sometimes) gate
     // `AudioContext.resume()` behind a user gesture, so a deep link or a
@@ -1707,7 +1994,9 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
     }
 
     playBtn.addEventListener("click", () => {
-        video.paused ? video.play() : video.pause()
+        const willPlay = video.paused
+        willPlay ? video.play() : video.pause()
+        houseParty.noteUserPlayPause(willPlay)
     })
     video.addEventListener("play", updatePlay)
     video.addEventListener("pause", updatePlay)
@@ -1738,6 +2027,7 @@ function attachPlayerControls({ video, stage, playBtn, scrub, timeDisplay, muteB
         video.currentTime = parseFloat(scrub.value)
         scrubbing = false
         persistNow()
+        houseParty.noteUserSeek()
     })
 
     muteBtn.addEventListener("click", () => {
@@ -1988,6 +2278,12 @@ document.addEventListener(
 window.addEventListener("hashchange", render)
 window.addEventListener("DOMContentLoaded", () => {
     wireSearchBox()
+    // House Party: install the header toggle and start the 1 Hz poll for the
+    // whole page lifetime (so the status stays live even when not joined, and
+    // joining can mirror immediately). Reconciliation is gated on `joined`.
+    setupHousePartyToggle()
+    houseParty.pollOnce()
+    setInterval(() => houseParty.pollOnce(), HOUSE_PARTY_POLL_MS)
     if (!location.hash) location.hash = "#/browse/"
     render()
 })
