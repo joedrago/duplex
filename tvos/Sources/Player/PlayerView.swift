@@ -84,9 +84,10 @@ struct PlayerView: View {
     // steady playback — this IS the "I started a video" broadcast. Skipped when
     // the playback was itself started by mirroring (the DJ already announced it).
     @State private var didAnnounce = false
-    // Absolute scrub destination, accumulated from arrow-key jumps. VLC's reported
-    // position lags a seek, so for arrow scrubs we broadcast this commanded value.
-    @State private var scrubTargetSeconds = 0
+    // Debounces the arrow-scrub broadcast. Holding an arrow arrives as a rapid
+    // stream of press-repeats; we keep the mirror suppressed throughout and
+    // broadcast ONE settled position when the stream stops.
+    @State private var scrubBroadcastTask: Task<Void, Never>?
     // Throttles mirror-driven seeks so a slow-to-load target can't storm.
     @State private var lastMirrorSeekAt: Date = .distantPast
 
@@ -147,6 +148,7 @@ struct PlayerView: View {
         .onDisappear {
             NSLog("[Duplex/Player/V] disappear vpath=%@ stackDepth=%d state=%@", vpath, nav.path.count, String(describing: session.state))
             osdHideTask?.cancel()
+            scrubBroadcastTask?.cancel()
             // The reliable back-out signal: the player always gets onDisappear,
             // whereas the Menu button isn't always delivered to our input view.
             // Leaving idles the party for the room — UNLESS the store itself is
@@ -426,8 +428,6 @@ struct PlayerView: View {
         scrubTimer?.invalidate()
         scrubTimer = nil
 
-        // Seed the running target from where we are, then accumulate jumps.
-        scrubTargetSeconds = session.positionSeconds
         applyScrub(direction: direction, step: baseSeekStep)
         bumpOSD()
 
@@ -450,20 +450,33 @@ struct PlayerView: View {
         scrubTimer = nil
         scrubStartedAt = nil
         scrubDirection = nil
-        // Explicit user seek → broadcast the commanded destination (one POST).
-        houseParty.broadcast(vpath: vpath, duration: Double(session.durationSeconds),
-                             position: Double(scrubTargetSeconds), playing: session.isPlaying)
+        scheduleScrubBroadcast()
     }
 
     private func applyScrub(direction: ScrubDirection, step: Int) {
-        let raw = direction == .forward ? scrubTargetSeconds + step : scrubTargetSeconds - step
-        let upper = session.durationSeconds > 0 ? session.durationSeconds - 1 : raw
-        scrubTargetSeconds = max(0, min(raw, upper))
+        // Keep the mirror suppressed for the whole scrub so it never fights us
+        // between press-repeats, and (re)arm the debounced broadcast.
+        houseParty.markLocalAction()
+        scheduleScrubBroadcast()
         guard #available(tvOS 16.0, *) else { return }
         let d: Duration = .seconds(step)
         switch direction {
         case .forward:  proxy.jumpForward(d)
         case .backward: proxy.jumpBackward(d)
+        }
+    }
+
+    /// Broadcast the scrub destination once the stream of jumps stops. Debounced
+    /// ~0.6s so a held arrow (many press-repeats) yields ONE POST, with VLC's
+    /// settled position rather than a mid-seek readback.
+    private func scheduleScrubBroadcast() {
+        scrubBroadcastTask?.cancel()
+        scrubBroadcastTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, houseParty.joined,
+                  nav.currentPlayerVpath == vpath else { return }
+            houseParty.broadcast(vpath: vpath, duration: Double(session.durationSeconds),
+                                 position: Double(session.positionSeconds), playing: session.isPlaying)
         }
     }
 
