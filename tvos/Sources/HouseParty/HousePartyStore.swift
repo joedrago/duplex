@@ -53,14 +53,6 @@ final class HousePartyStore: ObservableObject {
     var mirrorSuppressed: Bool { Date() < suppressMirrorUntil }
     func markLocalAction() { suppressMirrorUntil = Date().addingTimeInterval(2.5) }
 
-    /// True while the store itself is changing the current player (a mirror
-    /// push/swap, an idle-pop, or a programmatic Continue). The player's
-    /// `onDisappear` uses this to tell "the party moved me" (don't clear) from
-    /// "the user backed out" (clear). A short window covers the async teardown.
-    private var selfNavUntil: Date = .distantPast
-    var isSelfNavigating: Bool { Date() < selfNavUntil }
-    func markSelfNav() { selfNavUntil = Date().addingTimeInterval(1.0) }
-
     private var pollTask: Task<Void, Never>?
 
     private init() {
@@ -158,10 +150,7 @@ final class HousePartyStore: ObservableObject {
 
         if !state.active {
             // Party idle → make sure we're not playing anything.
-            if current != nil {
-                markSelfNav()
-                nav.path.removeLast()
-            }
+            if current != nil { nav.path.removeLast() }
             return
         }
         guard let target = state.vpath else { return }
@@ -172,7 +161,6 @@ final class HousePartyStore: ObservableObject {
         // Different video (or we're not in a player yet) → start the party's.
         NSLog("[Duplex/HouseParty] mirror start target=%@ current=%@ pos=%.1f playing=%d",
               target, current ?? "nil", state.position, state.playing ? 1 : 0)
-        markSelfNav()
         suppressAnnounceVpath = target
         nav.playFromHouseParty(vpath: target)
     }

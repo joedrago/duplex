@@ -150,12 +150,15 @@ struct PlayerView: View {
             NSLog("[Duplex/Player/V] disappear vpath=%@ stackDepth=%d state=%@", vpath, nav.path.count, String(describing: session.state))
             osdHideTask?.cancel()
             scrubBroadcastTask?.cancel()
-            // The reliable back-out signal: the player always gets onDisappear,
-            // whereas the Menu button isn't always delivered to our input view.
-            // Leaving idles the party for the room — UNLESS the store itself is
-            // changing the player (mirror swap / idle-pop / Continue), which also
-            // fires onDisappear.
-            if houseParty.joined, !houseParty.isSelfNavigating {
+            // Back-out detection, timing-free: clear the party only when we've
+            // actually left to a non-player screen AND the party is still active.
+            //  - user back-out  → top is Home/Browse (currentPlayerVpath == nil),
+            //                      party still active  → clear (idle the room).
+            //  - mirror swap A→B → top is the NEW player (non-nil)               → no clear.
+            //  - idle-pop        → party already inactive                        → no clear.
+            // (onDisappear is the reliable signal — the Menu button isn't always
+            // delivered to our input view.)
+            if houseParty.joined, nav.currentPlayerVpath == nil, houseParty.latest?.active == true {
                 houseParty.clear()
             }
             // Back-out path for the binge pop rule: if the user leaves with
@@ -255,9 +258,9 @@ struct PlayerView: View {
         // to Home renders black. A single assignment swaps the top destination
         // cleanly; .id(vpath) in makeView still forces a fresh PlayerView.
         NSLog("[Duplex/Player] Continue → vpath=%@ bingeId=%@", t.vpath, t.bingeId ?? "(none)")
-        // Programmatic player swap — not a user back-out — so onDisappear of the
-        // current player must not clear the party.
-        houseParty.markSelfNav()
+        // Swap the top in place — onDisappear of the old player sees the new one
+        // on top (currentPlayerVpath non-nil), so it won't be mistaken for a
+        // back-out and won't clear the party.
         nav.path[nav.path.count - 1] = .player(vpath: t.vpath, bingeId: t.bingeId)
     }
 
