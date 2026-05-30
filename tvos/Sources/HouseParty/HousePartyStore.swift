@@ -41,6 +41,26 @@ final class HousePartyStore: ObservableObject {
     /// announce.
     var suppressAnnounceVpath: String?
 
+    /// Local-authority window. After this client takes a local action (start /
+    /// scrub / pause / play / clear) it broadcasts that state, but the server
+    /// won't reflect it until the POST lands and the next poll returns it (~1s
+    /// round-trip). During that window we must NOT mirror incoming poll state,
+    /// or this client fights its own action — yanking a scrub back to the stale
+    /// server position, or popping the player on a stale `idle` right after we
+    /// started one. A follower never calls `markLocalAction`, so it is never
+    /// suppressed: "anyone can DJ" is preserved.
+    private var suppressMirrorUntil: Date = .distantPast
+    var mirrorSuppressed: Bool { Date() < suppressMirrorUntil }
+    func markLocalAction() { suppressMirrorUntil = Date().addingTimeInterval(2.5) }
+
+    /// True while the store itself is changing the current player (a mirror
+    /// push/swap, an idle-pop, or a programmatic Continue). The player's
+    /// `onDisappear` uses this to tell "the party moved me" (don't clear) from
+    /// "the user backed out" (clear). A short window covers the async teardown.
+    private var selfNavUntil: Date = .distantPast
+    var isSelfNavigating: Bool { Date() < selfNavUntil }
+    func markSelfNav() { selfNavUntil = Date().addingTimeInterval(1.0) }
+
     private var pollTask: Task<Void, Never>?
 
     private init() {
@@ -70,6 +90,7 @@ final class HousePartyStore: ObservableObject {
     /// Announce local playback state to the party. No-op when not joined.
     func broadcast(vpath: String, duration: Double, position: Double, playing: Bool) {
         guard joined else { return }
+        markLocalAction()
         NSLog("[Duplex/HouseParty] broadcast vpath=%@ pos=%.1f dur=%.1f playing=%d",
               vpath, position, duration, playing ? 1 : 0)
         Task {
@@ -85,6 +106,7 @@ final class HousePartyStore: ObservableObject {
     /// joined user backs out of a video.
     func clear() {
         guard joined else { return }
+        markLocalAction()
         NSLog("[Duplex/HouseParty] clear → idle")
         Task {
             do { try await client.clearHouseParty() } catch {
@@ -128,11 +150,18 @@ final class HousePartyStore: ObservableObject {
     /// the party is idle".
     private func reconcile(_ state: HousePartyState) {
         guard let nav else { return }
+        // Don't act on poll state that predates our own just-taken local action
+        // (see `suppressMirrorUntil`) — it would pop/restart the video we just
+        // started, before our announce has propagated.
+        if mirrorSuppressed { return }
         let current = nav.currentPlayerVpath
 
         if !state.active {
             // Party idle → make sure we're not playing anything.
-            if current != nil { nav.path.removeLast() }
+            if current != nil {
+                markSelfNav()
+                nav.path.removeLast()
+            }
             return
         }
         guard let target = state.vpath else { return }
@@ -141,8 +170,9 @@ final class HousePartyStore: ObservableObject {
             return
         }
         // Different video (or we're not in a player yet) → start the party's.
-        NSLog("[Duplex/HouseParty] mirror start vpath=%@ pos=%.1f playing=%d",
-              target, state.position, state.playing ? 1 : 0)
+        NSLog("[Duplex/HouseParty] mirror start target=%@ current=%@ pos=%.1f playing=%d",
+              target, current ?? "nil", state.position, state.playing ? 1 : 0)
+        markSelfNav()
         suppressAnnounceVpath = target
         nav.playFromHouseParty(vpath: target)
     }

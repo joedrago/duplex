@@ -53,15 +53,23 @@ final class NavCoordinator: ObservableObject {
     /// player. Used by `HousePartyStore` to decide whether the party's video is
     /// already the one we're playing.
     var currentPlayerVpath: String? {
-        if case .player(let vpath, _) = path.last { return vpath }
+        guard let last = path.last else { return nil }
+        if case .player(let vpath, _) = last { return vpath }
         return nil
     }
 
     /// Start (or swap to) a video because the House Party told us to mirror it.
     /// Bypasses the binge-chooser interception in `play(_:)` — mirroring is never
     /// a binge play — and swaps the top atomically when we're already in a
-    /// different player (the same race-free trick `PlayerView.playNext` uses).
+    /// *different* player (the same race-free trick `PlayerView.playNext` uses).
+    ///
+    /// Idempotent: if the top player is ALREADY this vpath, do nothing. Without
+    /// this guard a stray reconcile tick re-assigns an identical destination,
+    /// which tears down and rebuilds PlayerView (restarting VLC) — and the
+    /// rebuilt view re-announces itself, re-activating a just-cleared party. That
+    /// was the "backing out feeds back" loop.
     func playFromHouseParty(vpath: String) {
+        if currentPlayerVpath == vpath { return }
         if !path.isEmpty, case .player = path[path.count - 1] {
             path[path.count - 1] = .player(vpath: vpath, bingeId: nil)
         } else {

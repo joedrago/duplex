@@ -80,14 +80,15 @@ struct PlayerView: View {
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var houseParty = HousePartyStore.shared
 
-    // House Party: announce this video to the party exactly once, after it
-    // reaches steady playback. Suppressed when the playback was itself started
-    // by mirroring (the DJ already announced it).
+    // House Party: announce (broadcast) this video to the party once it reaches
+    // steady playback — this IS the "I started a video" broadcast. Skipped when
+    // the playback was itself started by mirroring (the DJ already announced it).
     @State private var didAnnounce = false
-    // Set when a user scrub finishes; the next playback tick broadcasts the
-    // settled position (VLC hasn't caught up at key-up, so we can't broadcast
-    // the accurate position synchronously).
-    @State private var pendingScrubBroadcast = false
+    // Absolute scrub destination, accumulated from arrow-key jumps. VLC's reported
+    // position lags a seek, so for arrow scrubs we broadcast this commanded value.
+    @State private var scrubTargetSeconds = 0
+    // Throttles mirror-driven seeks so a slow-to-load target can't storm.
+    @State private var lastMirrorSeekAt: Date = .distantPast
 
     @State private var osdVisible: Bool = true
     @State private var osdHideTask: Task<Void, Never>?
@@ -134,11 +135,26 @@ struct PlayerView: View {
         }
         .task {
             NSLog("[Duplex/Player/V] appear vpath=%@ bingeId=%@ stackDepth=%d", vpath, bingeId ?? "(none)", nav.path.count)
+            // A user-initiated start (not a mirror-start, which the store flags
+            // via suppressAnnounceVpath) opens the local-authority window
+            // immediately, so a stale `idle` poll can't pop us before our
+            // announce propagates.
+            if houseParty.joined, houseParty.suppressAnnounceVpath != vpath {
+                houseParty.markLocalAction()
+            }
             await session.start(client: client, vpath: vpath, bingeId: bingeId)
         }
         .onDisappear {
             NSLog("[Duplex/Player/V] disappear vpath=%@ stackDepth=%d state=%@", vpath, nav.path.count, String(describing: session.state))
             osdHideTask?.cancel()
+            // The reliable back-out signal: the player always gets onDisappear,
+            // whereas the Menu button isn't always delivered to our input view.
+            // Leaving idles the party for the room — UNLESS the store itself is
+            // changing the player (mirror swap / idle-pop / Continue), which also
+            // fires onDisappear.
+            if houseParty.joined, !houseParty.isSelfNavigating {
+                houseParty.clear()
+            }
             // Back-out path for the binge pop rule: if the user leaves with
             // <5% remaining, advance the binge here (idempotent with the
             // natural-end pop). Must run before stop() while position is valid.
@@ -158,10 +174,9 @@ struct PlayerView: View {
             applyHousePartyMirror()
         }
         .onChange(of: session.positionSeconds) { _, _ in
-            // The per-second playback tick: drives the one-shot announce and
-            // flushes a pending post-scrub broadcast with the settled position.
+            // Drives only the one-shot start announce. (Broadcasts come solely
+            // from explicit input handlers — never from observing state changes.)
             announceToHousePartyIfNeeded()
-            flushPendingScrubBroadcast()
         }
         .navigationBarHidden(true)
         .background(
@@ -237,6 +252,9 @@ struct PlayerView: View {
         // to Home renders black. A single assignment swaps the top destination
         // cleanly; .id(vpath) in makeView still forces a fresh PlayerView.
         NSLog("[Duplex/Player] Continue → vpath=%@ bingeId=%@", t.vpath, t.bingeId ?? "(none)")
+        // Programmatic player swap — not a user back-out — so onDisappear of the
+        // current player must not clear the party.
+        houseParty.markSelfNav()
         nav.path[nav.path.count - 1] = .player(vpath: t.vpath, bingeId: t.bingeId)
     }
 
@@ -341,47 +359,43 @@ struct PlayerView: View {
     private func togglePlay() {
         let willPlay = !session.isPlaying
         if session.isPlaying { proxy.pause() } else { proxy.play() }
-        // Broadcast the intended state immediately — position is accurate now,
-        // and others should pause/resume promptly. No-op when not joined.
-        houseParty.broadcast(
-            vpath: vpath,
-            duration: Double(session.durationSeconds),
-            position: Double(session.positionSeconds),
-            playing: willPlay
-        )
+        // Explicit user gesture → broadcast. No-op when not joined.
+        houseParty.broadcast(vpath: vpath, duration: Double(session.durationSeconds),
+                             position: Double(session.positionSeconds), playing: willPlay)
     }
 
-    /// Leave the player on a deliberate user back-out. When joined, this idles
-    /// the party for the whole room (the confirmed product decision: backing out
-    /// stops the shared video for everyone).
+    /// Leave the player. The party clear happens in `onDisappear` (the reliable
+    /// signal), so this just pops.
     private func backOut() {
-        houseParty.clear()
         nav.path.removeLast()
     }
 
-    // MARK: - House Party sync
+    // MARK: - House Party sync (server → local; never broadcasts)
 
-    /// Mirror the party's state onto the live player when it's the video we're
-    /// already playing. Only ever drives the proxy — never broadcasts — so there
-    /// is no feedback loop. The >1s position threshold is the user-specified
-    /// damping that keeps two clients from thrashing.
+    /// Conform the live player to the party state for the video we're already
+    /// playing. This is the ONLY code that reacts to the server, and it only ever
+    /// drives the proxy — it never broadcasts, so it cannot echo.
     private func applyHousePartyMirror() {
-        guard houseParty.joined, isPlayingState,
+        // `mirrorSuppressed`: we broadcast a local action moments ago; ignore the
+        // poll until the round-trip reflects it, so we don't undo ourselves.
+        guard houseParty.joined, !houseParty.mirrorSuppressed, isPlayingState,
               let s = houseParty.latest, s.active, s.vpath == vpath else { return }
         if s.playing && !session.isPlaying {
             proxy.play()
         } else if !s.playing && session.isPlaying {
             proxy.pause()
         }
-        // 2s tolerance, not 1s: a seek causes a brief buffer stall that leaves us
-        // ~1s behind, so a 1s threshold re-triggers itself every ~20s (a silent
-        // micro-skip, and an OSD flash every time). 2s lets steady-state jitter
-        // settle while still snapping instantly on a real DJ seek.
-        if abs(s.position - Double(session.positionSeconds)) > 2.0, #available(tvOS 16.0, *) {
+        // 2s tolerance: a seek causes a brief buffer stall that leaves us ~1s
+        // behind, so a 1s threshold re-triggers itself; 2s lets steady-state
+        // jitter settle while still snapping on a real DJ seek. The 2.5s cooldown
+        // stops a still-unreachable target from storming seeks.
+        if abs(s.position - Double(session.positionSeconds)) > 2.0,
+           Date().timeIntervalSince(lastMirrorSeekAt) > 2.5,
+           #available(tvOS 16.0, *) {
             NSLog("[Duplex/HouseParty] sync seek %d → %.1f", session.positionSeconds, s.position)
             proxy.setSeconds(.seconds(Int(s.position)))
-            // The party just yanked our position — flash the OSD so the jump is
-            // legible rather than a silent, mysterious skip.
+            lastMirrorSeekAt = Date()
+            // The party just moved our position — flash the OSD so it's legible.
             bumpOSD()
         }
     }
@@ -405,19 +419,6 @@ struct PlayerView: View {
         )
     }
 
-    /// Broadcast the settled position after a user scrub. Runs on the playback
-    /// tick so VLC has reported the post-seek position.
-    private func flushPendingScrubBroadcast() {
-        guard pendingScrubBroadcast else { return }
-        pendingScrubBroadcast = false
-        houseParty.broadcast(
-            vpath: vpath,
-            duration: Double(session.durationSeconds),
-            position: Double(session.positionSeconds),
-            playing: session.isPlaying
-        )
-    }
-
     /// Begin a scrub. Fires the initial ±baseSeekStep immediately so a quick
     /// tap still produces a discrete jump, then starts an accelerating timer
     /// that runs as long as the user holds the arrow key.
@@ -425,7 +426,8 @@ struct PlayerView: View {
         scrubTimer?.invalidate()
         scrubTimer = nil
 
-        // Immediate first jump.
+        // Seed the running target from where we are, then accumulate jumps.
+        scrubTargetSeconds = session.positionSeconds
         applyScrub(direction: direction, step: baseSeekStep)
         bumpOSD()
 
@@ -448,11 +450,15 @@ struct PlayerView: View {
         scrubTimer = nil
         scrubStartedAt = nil
         scrubDirection = nil
-        // Broadcast the new position on the next tick, once VLC has settled.
-        if houseParty.joined { pendingScrubBroadcast = true }
+        // Explicit user seek → broadcast the commanded destination (one POST).
+        houseParty.broadcast(vpath: vpath, duration: Double(session.durationSeconds),
+                             position: Double(scrubTargetSeconds), playing: session.isPlaying)
     }
 
     private func applyScrub(direction: ScrubDirection, step: Int) {
+        let raw = direction == .forward ? scrubTargetSeconds + step : scrubTargetSeconds - step
+        let upper = session.durationSeconds > 0 ? session.durationSeconds - 1 : raw
+        scrubTargetSeconds = max(0, min(raw, upper))
         guard #available(tvOS 16.0, *) else { return }
         let d: Duration = .seconds(step)
         switch direction {
@@ -833,13 +839,17 @@ final class PlayerSession: ObservableObject {
             attachNowPlayingIfNeeded(proxy: proxy, vpath: vpath)
             attachSidecarsIfNeeded(proxy: proxy)
             applyDefaultsIfNeeded(info: info, proxy: proxy, vpath: vpath)
-            if !didSeekToResume, let entry = ResumeStore.shared.get(vpath), entry.pos > 5 {
+            if !didSeekToResume {
                 didSeekToResume = true
-                if #available(tvOS 16.0, *) {
+                // In House Party, position is governed by the party, not the
+                // local resume point — skip the resume-seek so it doesn't fight
+                // the mirror, and so the DJ's announce reflects a clean start
+                // rather than a stale resume position captured before the seek.
+                if !HousePartyStore.shared.joined,
+                   let entry = ResumeStore.shared.get(vpath), entry.pos > 5,
+                   #available(tvOS 16.0, *) {
                     proxy.setSeconds(.seconds(Int(entry.pos)))
                 }
-            } else {
-                didSeekToResume = true
             }
         case .paused:
             isPlaying = false

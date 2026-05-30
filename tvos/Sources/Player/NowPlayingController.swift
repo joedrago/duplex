@@ -21,15 +21,31 @@ final class NowPlayingController {
     private weak var proxy: VLCVideoPlayer.Proxy?
     private weak var session: PlayerSession?
     private var title: String = ""
+    private var vpath: String = ""
     private var registrations: [(MPRemoteCommand, Any)] = []
     private var didConfigureAudioSession = false
 
     func attach(proxy: VLCVideoPlayer.Proxy, session: PlayerSession, vpath: String) {
         self.proxy = proxy
         self.session = session
+        self.vpath = vpath
         self.title = DuplexFormat.leaf(of: vpath)
         configureAudioSessionOnce()
         registerCommands()
+    }
+
+    /// Mirror a Siri / Control Center / system-scrubber command to House Party.
+    /// These are explicit user gestures, identical in intent to the on-screen
+    /// controls — they just arrive through `MPRemoteCommandCenter`. No-op when
+    /// not joined.
+    private func broadcastHouseParty(position: Double, playing: Bool) {
+        guard let session else { return }
+        HousePartyStore.shared.broadcast(
+            vpath: vpath,
+            duration: Double(session.durationSeconds),
+            position: position,
+            playing: playing
+        )
     }
 
     func detach() {
@@ -65,22 +81,24 @@ final class NowPlayingController {
         let center = MPRemoteCommandCenter.shared()
 
         register(center.playCommand) { [weak self] _ in
-            self?.proxy?.play()
-            self?.onRemoteCommand?()
+            guard let self else { return .commandFailed }
+            self.proxy?.play()
+            self.broadcastHouseParty(position: Double(self.session?.positionSeconds ?? 0), playing: true)
+            self.onRemoteCommand?()
             return .success
         }
         register(center.pauseCommand) { [weak self] _ in
-            self?.proxy?.pause()
-            self?.onRemoteCommand?()
+            guard let self else { return .commandFailed }
+            self.proxy?.pause()
+            self.broadcastHouseParty(position: Double(self.session?.positionSeconds ?? 0), playing: false)
+            self.onRemoteCommand?()
             return .success
         }
         register(center.togglePlayPauseCommand) { [weak self] _ in
             guard let self else { return .commandFailed }
-            if self.session?.isPlaying == true {
-                self.proxy?.pause()
-            } else {
-                self.proxy?.play()
-            }
+            let willPlay = self.session?.isPlaying != true
+            if willPlay { self.proxy?.play() } else { self.proxy?.pause() }
+            self.broadcastHouseParty(position: Double(self.session?.positionSeconds ?? 0), playing: willPlay)
             self.onRemoteCommand?()
             return .success
         }
@@ -92,6 +110,8 @@ final class NowPlayingController {
             if #available(tvOS 16.0, *) {
                 self.proxy?.jumpForward(.seconds(Int(interval)))
             }
+            let target = Double((self.session?.positionSeconds ?? 0) + Int(interval))
+            self.broadcastHouseParty(position: target, playing: self.session?.isPlaying ?? true)
             self.onRemoteCommand?()
             return .success
         }
@@ -102,11 +122,15 @@ final class NowPlayingController {
             if #available(tvOS 16.0, *) {
                 self.proxy?.jumpBackward(.seconds(Int(interval)))
             }
+            let target = Double(max(0, (self.session?.positionSeconds ?? 0) - Int(interval)))
+            self.broadcastHouseParty(position: target, playing: self.session?.isPlaying ?? true)
             self.onRemoteCommand?()
             return .success
         }
 
-        // The big one — "seek to 20 minutes" lands here.
+        // The big one — "seek to 20 minutes" / the system scrubber lands here.
+        // `positionTime` is the exact destination, so we broadcast it directly
+        // (no VLC-readback lag).
         register(center.changePlaybackPositionCommand) { [weak self] event in
             guard let self,
                   let pos = event as? MPChangePlaybackPositionCommandEvent else {
@@ -115,6 +139,7 @@ final class NowPlayingController {
             if #available(tvOS 16.0, *) {
                 self.proxy?.setSeconds(.seconds(Int(pos.positionTime)))
             }
+            self.broadcastHouseParty(position: pos.positionTime, playing: self.session?.isPlaying ?? true)
             self.onRemoteCommand?()
             return .success
         }
