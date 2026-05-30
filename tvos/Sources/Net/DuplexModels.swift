@@ -194,6 +194,20 @@ struct FlattenResponse: Decodable {
     let vpaths: [String]
 }
 
+// MARK: - House Party
+
+/// The shared "fake player" state from `/api/houseparty`. `active == false`
+/// means the party is idle (nothing playing); the other fields are then zeroed.
+struct HousePartyState: Decodable, Equatable {
+    let active: Bool
+    let vpath: String?
+    let duration: Double
+    let position: Double
+    let playing: Bool
+
+    static let idle = HousePartyState(active: false, vpath: nil, duration: 0, position: 0, playing: false)
+}
+
 // MARK: - Manifest
 
 // The server no longer probes files, so the manifest carries only what it can

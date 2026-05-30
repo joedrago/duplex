@@ -12,6 +12,7 @@ use crate::library::Library;
 pub mod browse;
 pub mod debug;
 pub mod flatten;
+pub mod houseparty;
 pub mod manifest;
 pub mod next;
 pub mod raw;
@@ -26,6 +27,8 @@ pub mod web;
 pub struct AppState {
     pub library: Library,
     pub cfg: Arc<Cli>,
+    /// Shared "House Party" fake-player state — see `houseparty`.
+    pub houseparty: houseparty::HouseParty,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -50,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .merge(next::routes())
         .merge(flatten::routes())
         .merge(search::routes())
+        .merge(houseparty::routes())
         .merge(debug::routes())
         .merge(web::routes())
         .with_state(state)

@@ -51,6 +51,7 @@ enum HomeFocus: Hashable {
     case recent(String)
     case binge(String)
     case continueWatching(String)
+    case houseParty
     case settings
 }
 
@@ -60,6 +61,7 @@ struct HomeView: View {
     @ObservedObject private var resume = ResumeStore.shared
     @ObservedObject private var binges = BingeStore.shared
     @ObservedObject private var sort = SortPreference.shared
+    @ObservedObject private var houseParty = HousePartyStore.shared
 
     @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
@@ -133,7 +135,7 @@ struct HomeView: View {
     /// arrows cross between adjacent columns naturally. The third column stacks
     /// binges above Continue Watching, so up/down flows through both.
     private var focusColumns: [[HomeFocus]] {
-        let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.settings]
+        let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.houseParty, .settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
         let bingeKeys: [HomeFocus] = bingeItems.map { .binge($0.id) }
         let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
@@ -166,6 +168,8 @@ struct HomeView: View {
             }
         case .continueWatching(let vpath):
             nav.play(vpath: vpath)
+        case .houseParty:
+            if houseParty.joined { houseParty.leave() } else { houseParty.join() }
         case .settings:
             nav.push(.settings)
         case .search:
@@ -314,10 +318,31 @@ struct HomeView: View {
                     .fill(DuplexColor.border)
                     .frame(height: 1)
                     .padding(.vertical, 6)
+                housePartyRow
+                    .id(HomeFocus.houseParty)
                 settingsRow
                     .id(HomeFocus.settings)
             }
         }
+    }
+
+    private var housePartyRow: some View {
+        GridEntryRow(
+            icon: "🎉",
+            title: houseParty.joined ? "Leave House Party" : "Join House Party",
+            subtitle: nil,
+            meta: housePartyStatus,
+            isFocused: focus == .houseParty
+        )
+    }
+
+    /// Live party status shown as the row's meta: "Idle" when nothing is
+    /// playing, otherwise the leaf name of the current video. `nil` until the
+    /// first poll lands (no meta column).
+    private var housePartyStatus: String? {
+        guard let s = houseParty.latest else { return nil }
+        guard s.active, let vpath = s.vpath else { return "Idle" }
+        return DuplexFormat.leaf(of: vpath)
     }
 
     private var searchRow: some View {

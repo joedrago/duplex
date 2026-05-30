@@ -65,6 +65,31 @@ struct DuplexClient {
         return try await getJSON("/api/search", query: ["q": q, "limit": String(limit)])
     }
 
+    // MARK: House Party
+
+    /// `GET /api/houseparty` — the shared fake-player state.
+    func housePartyState() async throws -> HousePartyState {
+        try await getJSON("/api/houseparty", query: [:])
+    }
+
+    /// `POST /api/houseparty` — override the party with this playback state,
+    /// becoming the "DJ". The server starts advancing `position` from now.
+    func postHouseParty(vpath: String, duration: Double, position: Double, playing: Bool) async throws {
+        let body: [String: Any] = [
+            "vpath": vpath,
+            "duration": duration,
+            "position": position,
+            "playing": playing,
+        ]
+        try await send("/api/houseparty", method: "POST", jsonBody: body)
+    }
+
+    /// `DELETE /api/houseparty` — force the party idle (stops the video for the
+    /// whole room).
+    func clearHouseParty() async throws {
+        try await send("/api/houseparty", method: "DELETE", jsonBody: nil)
+    }
+
     func rawURL(path: String) -> URL {
         url("/api/raw", query: ["path": path])
     }
@@ -78,8 +103,35 @@ struct DuplexClient {
     private func url(_ pathComponent: String, query: [String: String]) -> URL {
         var comps = URLComponents(url: baseURL.appendingPathComponent(pathComponent),
                                   resolvingAgainstBaseURL: false)!
-        comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        if !query.isEmpty {
+            comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
         return comps.url!
+    }
+
+    /// POST/DELETE that doesn't decode a body — just validates the status code.
+    /// `jsonBody` is serialized when non-nil.
+    private func send(_ pathComponent: String, method: String, jsonBody: [String: Any]?) async throws {
+        var req = URLRequest(url: url(pathComponent, query: [:]))
+        req.httpMethod = method
+        if let jsonBody {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: jsonBody)
+        }
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch {
+            throw DuplexClientError.transport(error)
+        }
+        guard let http = resp as? HTTPURLResponse else {
+            throw DuplexClientError.http(-1, "no HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw DuplexClientError.http(http.statusCode, body)
+        }
     }
 
     private func getJSON<T: Decodable>(_ pathComponent: String, query: [String: String]) async throws -> T {

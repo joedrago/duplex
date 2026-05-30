@@ -78,6 +78,16 @@ struct PlayerView: View {
     @StateObject private var proxy = VLCVideoPlayer.Proxy()
     @StateObject private var session = PlayerSession()
     @EnvironmentObject private var nav: NavCoordinator
+    @ObservedObject private var houseParty = HousePartyStore.shared
+
+    // House Party: announce this video to the party exactly once, after it
+    // reaches steady playback. Suppressed when the playback was itself started
+    // by mirroring (the DJ already announced it).
+    @State private var didAnnounce = false
+    // Set when a user scrub finishes; the next playback tick broadcasts the
+    // settled position (VLC hasn't caught up at key-up, so we can't broadcast
+    // the accurate position synchronously).
+    @State private var pendingScrubBroadcast = false
 
     @State private var osdVisible: Bool = true
     @State private var osdHideTask: Task<Void, Never>?
@@ -113,7 +123,7 @@ struct PlayerView: View {
                     onContinue: { playNext() },
                     onDone: {
                         NSLog("[Duplex/Player] Done pressed; vpath=%@", vpath)
-                        nav.path.removeLast()
+                        backOut()
                     }
                 )
             case .failed(let reason):
@@ -142,6 +152,16 @@ struct PlayerView: View {
         .onChange(of: session.remoteCommandTick) { _, _ in
             // Siri / Control Center / headphone button just fired — flash OSD.
             bumpOSD()
+        }
+        .onChange(of: houseParty.latest) { _, _ in
+            // Mirror (server → local) for the video we're already playing.
+            applyHousePartyMirror()
+        }
+        .onChange(of: session.positionSeconds) { _, _ in
+            // The per-second playback tick: drives the one-shot announce and
+            // flushes a pending post-scrub broadcast with the settled position.
+            announceToHousePartyIfNeeded()
+            flushPendingScrubBroadcast()
         }
         .navigationBarHidden(true)
         .background(
@@ -172,14 +192,14 @@ struct PlayerView: View {
                 onPlayPauseTap: { togglePlay(); bumpOSD() },
                 onMenuTap: {
                     if pickerOpen { pickerOpen = false }
-                    else { nav.path.removeLast() }
+                    else { backOut() }
                 }
             )
         )
         .onExitCommand {
             // Fires when picker focus has Menu pressed (RemoteInput is inactive then).
             if pickerOpen { pickerOpen = false }
-            else { nav.path.removeLast() }
+            else { backOut() }
         }
     }
 
@@ -319,7 +339,83 @@ struct PlayerView: View {
     // MARK: - Input handling
 
     private func togglePlay() {
+        let willPlay = !session.isPlaying
         if session.isPlaying { proxy.pause() } else { proxy.play() }
+        // Broadcast the intended state immediately — position is accurate now,
+        // and others should pause/resume promptly. No-op when not joined.
+        houseParty.broadcast(
+            vpath: vpath,
+            duration: Double(session.durationSeconds),
+            position: Double(session.positionSeconds),
+            playing: willPlay
+        )
+    }
+
+    /// Leave the player on a deliberate user back-out. When joined, this idles
+    /// the party for the whole room (the confirmed product decision: backing out
+    /// stops the shared video for everyone).
+    private func backOut() {
+        houseParty.clear()
+        nav.path.removeLast()
+    }
+
+    // MARK: - House Party sync
+
+    /// Mirror the party's state onto the live player when it's the video we're
+    /// already playing. Only ever drives the proxy — never broadcasts — so there
+    /// is no feedback loop. The >1s position threshold is the user-specified
+    /// damping that keeps two clients from thrashing.
+    private func applyHousePartyMirror() {
+        guard houseParty.joined, isPlayingState,
+              let s = houseParty.latest, s.active, s.vpath == vpath else { return }
+        if s.playing && !session.isPlaying {
+            proxy.play()
+        } else if !s.playing && session.isPlaying {
+            proxy.pause()
+        }
+        // 2s tolerance, not 1s: a seek causes a brief buffer stall that leaves us
+        // ~1s behind, so a 1s threshold re-triggers itself every ~20s (a silent
+        // micro-skip, and an OSD flash every time). 2s lets steady-state jitter
+        // settle while still snapping instantly on a real DJ seek.
+        if abs(s.position - Double(session.positionSeconds)) > 2.0, #available(tvOS 16.0, *) {
+            NSLog("[Duplex/HouseParty] sync seek %d → %.1f", session.positionSeconds, s.position)
+            proxy.setSeconds(.seconds(Int(s.position)))
+            // The party just yanked our position — flash the OSD so the jump is
+            // legible rather than a silent, mysterious skip.
+            bumpOSD()
+        }
+    }
+
+    /// Announce this video to the party once it's playing with a known duration —
+    /// unless this playback was started by mirroring, in which case the DJ
+    /// already announced it (the store flagged it via `suppressAnnounceVpath`).
+    private func announceToHousePartyIfNeeded() {
+        guard houseParty.joined, !didAnnounce,
+              session.durationSeconds > 0, session.isPlaying else { return }
+        didAnnounce = true
+        if houseParty.suppressAnnounceVpath == vpath {
+            houseParty.suppressAnnounceVpath = nil
+            return
+        }
+        houseParty.broadcast(
+            vpath: vpath,
+            duration: Double(session.durationSeconds),
+            position: Double(session.positionSeconds),
+            playing: true
+        )
+    }
+
+    /// Broadcast the settled position after a user scrub. Runs on the playback
+    /// tick so VLC has reported the post-seek position.
+    private func flushPendingScrubBroadcast() {
+        guard pendingScrubBroadcast else { return }
+        pendingScrubBroadcast = false
+        houseParty.broadcast(
+            vpath: vpath,
+            duration: Double(session.durationSeconds),
+            position: Double(session.positionSeconds),
+            playing: session.isPlaying
+        )
     }
 
     /// Begin a scrub. Fires the initial ±baseSeekStep immediately so a quick
@@ -352,6 +448,8 @@ struct PlayerView: View {
         scrubTimer = nil
         scrubStartedAt = nil
         scrubDirection = nil
+        // Broadcast the new position on the next tick, once VLC has settled.
+        if houseParty.joined { pendingScrubBroadcast = true }
     }
 
     private func applyScrub(direction: ScrubDirection, step: Int) {

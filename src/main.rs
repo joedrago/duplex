@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         library,
         cfg: Arc::new(cli.clone()),
+        houseparty: api::houseparty::new(),
     };
     let app = api::router(state);
 

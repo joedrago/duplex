@@ -34,6 +34,11 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .background(DuplexColor.bg.ignoresSafeArea())
+        .onAppear {
+            // Give the House Party store a handle to navigation so it can mirror
+            // the party (start/stop the shared video). Set once.
+            HousePartyStore.shared.nav = nav
+        }
     }
 }
 
@@ -43,6 +48,26 @@ final class NavCoordinator: ObservableObject {
 
     func push(_ dest: NavDestination) { path.append(dest) }
     func popToRoot() { path.removeAll() }
+
+    /// The vpath of the player at the top of the stack, if we're currently in a
+    /// player. Used by `HousePartyStore` to decide whether the party's video is
+    /// already the one we're playing.
+    var currentPlayerVpath: String? {
+        if case .player(let vpath, _) = path.last { return vpath }
+        return nil
+    }
+
+    /// Start (or swap to) a video because the House Party told us to mirror it.
+    /// Bypasses the binge-chooser interception in `play(_:)` — mirroring is never
+    /// a binge play — and swaps the top atomically when we're already in a
+    /// different player (the same race-free trick `PlayerView.playNext` uses).
+    func playFromHouseParty(vpath: String) {
+        if !path.isEmpty, case .player = path[path.count - 1] {
+            path[path.count - 1] = .player(vpath: vpath, bingeId: nil)
+        } else {
+            push(.player(vpath: vpath, bingeId: nil))
+        }
+    }
 
     /// Single choke point for starting playback of a video.
     ///
