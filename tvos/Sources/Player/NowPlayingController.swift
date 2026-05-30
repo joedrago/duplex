@@ -29,7 +29,7 @@ final class NowPlayingController {
         self.proxy = proxy
         self.session = session
         self.vpath = vpath
-        self.title = DuplexFormat.leaf(of: vpath)
+        self.title = DuplexFormat.displayFileLeaf(of: vpath)
         configureAudioSessionOnce()
         registerCommands()
     }

@@ -17,6 +17,10 @@ struct BrowseHeader: View {
                 Spacer(minLength: 0)
             }
         }
+        // Fixed height so the House Party badge (or breadcrumbs) appearing can't
+        // grow the header and shove the content below it — same reasoning as the
+        // reserved-height footer hint on Home.
+        .frame(height: 52)
         .padding(.horizontal, 40)
         .padding(.top, 24)
         .padding(.bottom, 16)

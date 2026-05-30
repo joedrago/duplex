@@ -58,6 +58,7 @@ enum SearchFocus: Hashable {
 struct SearchView: View {
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var session = SearchSession.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
     @State private var focusedKey: SearchFocus? = .input
     @State private var inputOpen: Bool = false
 
@@ -216,7 +217,7 @@ struct SearchView: View {
         case .file(let name, _, let mtime, let size):
             GridEntryRow(
                 icon: "🎬",
-                title: name,
+                title: DuplexFormat.displayFileName(name),
                 subtitle: parent.isEmpty ? nil : parent,
                 meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))",
                 isFocused: isFocused

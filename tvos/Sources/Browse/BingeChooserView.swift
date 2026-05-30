@@ -12,6 +12,7 @@ struct BingeChooserView: View {
 
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var store = BingeStore.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
 
     private var matches: [Binge] { store.bingesWithFront(vpath) }
 
@@ -25,7 +26,7 @@ struct BingeChooserView: View {
                     Text("Continue a binge?")
                         .font(.system(size: 34, weight: .bold))
                         .foregroundStyle(DuplexColor.fg)
-                    Text(DuplexFormat.leaf(of: vpath))
+                    Text(DuplexFormat.displayFileLeaf(of: vpath))
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(DuplexColor.muted)
                         .lineLimit(1)

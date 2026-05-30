@@ -62,6 +62,7 @@ struct HomeView: View {
     @ObservedObject private var binges = BingeStore.shared
     @ObservedObject private var sort = SortPreference.shared
     @ObservedObject private var houseParty = HousePartyStore.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
 
     @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
@@ -342,7 +343,7 @@ struct HomeView: View {
     private var housePartyStatus: String? {
         guard let s = houseParty.latest else { return nil }
         guard s.active, let vpath = s.vpath else { return "Idle" }
-        return DuplexFormat.leaf(of: vpath)
+        return DuplexFormat.displayFileLeaf(of: vpath)
     }
 
     private var searchRow: some View {
@@ -370,7 +371,7 @@ struct HomeView: View {
         case .file(let name, _, let size, _):
             GridEntryRow(
                 icon: "🎬",
-                title: name,
+                title: DuplexFormat.displayFileName(name),
                 subtitle: nil,
                 meta: DuplexFormat.size(size),
                 isFocused: focus == key
@@ -425,7 +426,7 @@ struct HomeView: View {
         case .file(let name, _, let mtime, let size):
             GridEntryRow(
                 icon: "🎬",
-                title: name,
+                title: DuplexFormat.displayFileName(name),
                 subtitle: parent,
                 meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))",
                 isFocused: focus == key
@@ -455,7 +456,7 @@ struct HomeView: View {
                 let key = HomeFocus.binge(binge.id)
                 GridBingeRow(
                     origin: binge.origin,
-                    nextLeaf: DuplexFormat.leaf(of: binge.front ?? ""),
+                    nextLeaf: DuplexFormat.displayFileLeaf(of: binge.front ?? ""),
                     remaining: binge.remaining,
                     isFocused: focus == key
                 )
@@ -474,7 +475,7 @@ struct HomeView: View {
                 let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
                 let key = HomeFocus.continueWatching(item.vpath)
                 GridContinueRow(
-                    title: DuplexFormat.leaf(of: item.vpath),
+                    title: DuplexFormat.displayFileLeaf(of: item.vpath),
                     subtitle: DuplexFormat.parent(of: item.vpath),
                     progress: progress,
                     isFocused: focus == key

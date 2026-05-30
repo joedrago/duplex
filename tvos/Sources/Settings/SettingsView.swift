@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var resume = ResumeStore.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
     @State private var serverOverride: String = ""
     @State private var confirmForget: ConfirmTarget?
 
@@ -29,6 +30,13 @@ struct SettingsView: View {
                     ) {
                         Button("Forget all") { confirmForget = .resumes }
                             .disabled(resume.count == 0)
+                    }
+
+                    settingRow(
+                        title: "File extensions",
+                        status: ext.showExtensions ? "Shown" : "Hidden"
+                    ) {
+                        Button(ext.showExtensions ? "Hide" : "Show") { ext.toggle() }
                     }
 
                     serverURLRow

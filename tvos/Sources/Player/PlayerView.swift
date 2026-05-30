@@ -79,6 +79,7 @@ struct PlayerView: View {
     @StateObject private var session = PlayerSession()
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var houseParty = HousePartyStore.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
 
     // House Party: announce (broadcast) this video to the party once it reaches
     // steady playback — this IS the "I started a video" broadcast. Skipped when
@@ -227,9 +228,9 @@ struct PlayerView: View {
     /// `.ended` handler); otherwise it's the `/api/next` sibling.
     private var nextDisplayName: String? {
         if let bid = bingeId {
-            return BingeStore.shared.binge(id: bid)?.front.map { DuplexFormat.leaf(of: $0) }
+            return BingeStore.shared.binge(id: bid)?.front.map { DuplexFormat.displayFileLeaf(of: $0) }
         }
-        return session.nextEntry?.name
+        return session.nextEntry.map { DuplexFormat.displayFileName($0.name) }
     }
 
     /// Play whatever `nextDisplayName` describes, preserving binge binding.
@@ -291,7 +292,7 @@ struct PlayerView: View {
 
             if osdVisible && !pickerOpen {
                 PlayerOSDBar(
-                    title: DuplexFormat.leaf(of: vpath),
+                    title: DuplexFormat.displayFileLeaf(of: vpath),
                     isPlaying: session.isPlaying,
                     positionSeconds: session.positionSeconds,
                     durationSeconds: session.durationSeconds
@@ -792,21 +793,22 @@ final class PlayerSession: ObservableObject {
         self.nextEntry = next
     }
 
-    /// Add the manifest's sidecar subtitle files to VLC as playback children.
-    /// Idempotent — only runs once per session, after VLC reports `.playing`.
+    /// Add the manifest's sidecar subtitle files to VLC as playback children so
+    /// they appear in the picker. Idempotent — runs once after VLC reports
+    /// `.playing`.
     ///
-    /// `enforce: true` on the first slave so VLC activates it immediately —
-    /// without this, text-format slaves load into the track list but never
-    /// actually render until the user opens the picker AND VLC's text
-    /// renderer is happy. Force-enabling lets us verify the rendering path.
+    /// `enforce: false` — we do NOT auto-activate any sidecar. The default is
+    /// "no subtitles" (see `applySavedSubIfPossible`); a sidecar only turns on
+    /// when the user picks it, or when their saved preference points at it.
+    /// (Enforcing the first slave used to silently force subs on whenever a file
+    /// had a sidecar.)
     func attachSidecarsIfNeeded(proxy: VLCVideoPlayer.Proxy) {
         guard !didAttachSidecars else { return }
         didAttachSidecars = true
-        for (i, sc) in sidecarSubURLs.enumerated() {
-            let enforce = (i == 0)
-            NSLog("[Duplex/Player] addPlaybackChild sub idx=%d lang=%@ enforce=%d url=%@",
-                  sc.idx, sc.lang ?? "?", enforce ? 1 : 0, sc.url.absoluteString)
-            proxy.addPlaybackChild(.init(url: sc.url, type: .subtitle, enforce: enforce))
+        for sc in sidecarSubURLs {
+            NSLog("[Duplex/Player] addPlaybackChild sub idx=%d lang=%@ url=%@",
+                  sc.idx, sc.lang ?? "?", sc.url.absoluteString)
+            proxy.addPlaybackChild(.init(url: sc.url, type: .subtitle, enforce: false))
         }
     }
 
@@ -966,6 +968,11 @@ final class PlayerSession: ObservableObject {
     private func applySavedSubIfPossible(proxy: VLCVideoPlayer.Proxy, vpath: String) {
         guard !didApplySavedSub else { return }
         guard let savedSub = TrackPrefsStore.shared.get(vpath)?.sub else {
+            // No saved preference → default to None (off). Without explicitly
+            // selecting -1, VLC auto-enables an embedded/default subtitle track.
+            NSLog("[Duplex/Player] no saved sub pref → default None")
+            proxy.setSubtitleTrack(.absolute(-1))
+            currentSubtitleTrackIndex = -1
             didApplySavedSub = true
             return
         }

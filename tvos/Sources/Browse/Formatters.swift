@@ -41,6 +41,22 @@ enum DuplexFormat {
         return vpath
     }
 
+    /// Display form of a FILE's name: strips the trailing extension unless the
+    /// user has opted to show extensions. "Show.S01E02.mkv" → "Show.S01E02".
+    /// Only call this for files — directory names have no extension to strip.
+    /// Views rendering file names should observe `ExtensionPreference.shared` so
+    /// they re-render when the toggle flips.
+    static func displayFileName(_ name: String) -> String {
+        guard !ExtensionPreference.shared.showExtensions else { return name }
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return name }
+        return String(name[..<dot])
+    }
+
+    /// `displayFileName` applied to the leaf of a file vpath.
+    static func displayFileLeaf(of vpath: String) -> String {
+        displayFileName(leaf(of: vpath))
+    }
+
     /// Everything before the last slash, for showing context. Empty if none.
     static func parent(of vpath: String) -> String {
         if let i = vpath.lastIndex(of: "/") {

@@ -41,6 +41,7 @@ struct BrowseView: View {
 
     @StateObject private var vm = BrowseViewModel()
     @ObservedObject private var sort = SortPreference.shared
+    @ObservedObject private var ext = ExtensionPreference.shared
     @EnvironmentObject private var nav: NavCoordinator
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
@@ -269,7 +270,7 @@ struct BrowseView: View {
         case .file(let name, _, let size, let mtime):
             GridEntryRow(
                 icon: "🎬",
-                title: name,
+                title: DuplexFormat.displayFileName(name),
                 subtitle: nil,
                 meta: sort.mode == .recent
                     ? "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))"
