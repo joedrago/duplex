@@ -173,14 +173,14 @@ struct HomeView: View {
         case .library(let name):
             if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
-                case .dir(let n, _, _):           nav.push(.browse(path: n))
+                case .dir(let n, _, _, _):           nav.push(.browse(path: n))
                 case .file(let n, _, _, _, _):    nav.play(vpath: n)
                 }
             }
         case .recent(let id):
             if let item = recentItems.first(where: { $0.id == id }) {
                 switch item {
-                case .dir(_, let vpath, _, _):    nav.push(.browse(path: vpath))
+                case .dir(_, let vpath, _, _, _):    nav.push(.browse(path: vpath))
                 case .file(_, let vpath, _, _, _):   nav.play(vpath: vpath)
                 }
             }
@@ -384,7 +384,7 @@ struct HomeView: View {
     private func libraryRow(_ entry: Entry) -> some View {
         let key = HomeFocus.library(entry.name)
         switch entry {
-        case .dir(let name, let children, _):
+        case .dir(let name, let children, _, _):
             GridEntryRow(
                 icon: "📁",
                 title: name,
@@ -447,8 +447,13 @@ struct HomeView: View {
     private func recentPosterCell(_ item: RecentItem) -> some View {
         let isFocused = focus == .recent(item.id)
         switch item {
-        case .dir(let name, _, _, _):
-            PosterCell(url: nil, fallbackGlyph: "📁", title: name, isFocused: isFocused)
+        case .dir(let name, let vpath, _, _, let hasPoster):
+            PosterCell(
+                url: hasPoster ? client.posterURL(path: vpath) : nil,
+                fallbackGlyph: "📁",
+                title: name,
+                isFocused: isFocused
+            )
         case .file(let name, let vpath, _, _, let hasPoster):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: vpath) : nil,
@@ -464,7 +469,7 @@ struct HomeView: View {
         let parent = DuplexFormat.parent(of: item.vpath)
         let key = HomeFocus.recent(item.id)
         switch item {
-        case .dir(let name, _, let mtime, let children):
+        case .dir(let name, _, let mtime, let children, _):
             GridEntryRow(
                 icon: "📁",
                 title: name,

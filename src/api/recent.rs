@@ -45,6 +45,8 @@ pub enum Item {
         vpath: String,
         mtime: i64,
         children: usize,
+        /// Whether a sidecar poster image is available for this directory.
+        poster: bool,
     },
     File {
         name: String,
@@ -88,6 +90,7 @@ pub async fn recent(
                     vpath,
                     mtime: epoch_seconds(d.mtime),
                     children: d.children.len(),
+                    poster: d.poster.is_some(),
                 }),
                 Node::File(f) => items.push(Item::File {
                     name: name.clone(),

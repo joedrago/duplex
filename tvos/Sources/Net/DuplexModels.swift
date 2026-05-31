@@ -8,21 +8,21 @@ struct BrowseResponse: Decodable {
 }
 
 enum Entry: Decodable, Identifiable, Hashable {
-    case dir(name: String, children: Int, mtime: Int64)
+    case dir(name: String, children: Int, mtime: Int64, poster: Bool)
     case file(name: String, ext: String?, size: UInt64, mtime: Int64, poster: Bool)
 
     var id: String { name }
 
     var name: String {
         switch self {
-        case .dir(let n, _, _): return n
+        case .dir(let n, _, _, _): return n
         case .file(let n, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
-        case .dir(_, _, let m): return m
+        case .dir(_, _, let m, _): return m
         case .file(_, _, _, let m, _): return m
         }
     }
@@ -32,11 +32,13 @@ enum Entry: Decodable, Identifiable, Hashable {
         return false
     }
 
-    /// Whether a sidecar poster image is available for this file (always false
-    /// for directories).
+    /// Whether a poster image is available (directories can have one too, via a
+    /// sidecar `.jpg` matching the folder name or an inherited ancestor poster).
     var hasPoster: Bool {
-        if case .file(_, _, _, _, let poster) = self { return poster }
-        return false
+        switch self {
+        case .dir(_, _, _, let poster):     return poster
+        case .file(_, _, _, _, let poster): return poster
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -52,7 +54,8 @@ enum Entry: Decodable, Identifiable, Hashable {
         case "dir":
             self = .dir(name: name,
                         children: try c.decode(Int.self, forKey: .children),
-                        mtime: mtime)
+                        mtime: mtime,
+                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
         case "file":
             self = .file(name: name,
                          ext: try c.decodeIfPresent(String.self, forKey: .ext),
@@ -73,28 +76,28 @@ struct RecentResponse: Decodable {
 }
 
 enum RecentItem: Decodable, Identifiable, Hashable {
-    case dir(name: String, vpath: String, mtime: Int64, children: Int)
+    case dir(name: String, vpath: String, mtime: Int64, children: Int, poster: Bool)
     case file(name: String, vpath: String, mtime: Int64, size: UInt64, poster: Bool)
 
     var id: String { vpath }
 
     var vpath: String {
         switch self {
-        case .dir(_, let v, _, _): return v
+        case .dir(_, let v, _, _, _): return v
         case .file(_, let v, _, _, _): return v
         }
     }
 
     var name: String {
         switch self {
-        case .dir(let n, _, _, _): return n
+        case .dir(let n, _, _, _, _): return n
         case .file(let n, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
-        case .dir(_, _, let m, _): return m
+        case .dir(_, _, let m, _, _): return m
         case .file(_, _, let m, _, _): return m
         }
     }
@@ -104,11 +107,12 @@ enum RecentItem: Decodable, Identifiable, Hashable {
         return false
     }
 
-    /// Whether a sidecar poster image is available for this file (always false
-    /// for directories).
+    /// Whether a poster image is available (directories can have one too).
     var hasPoster: Bool {
-        if case .file(_, _, _, _, let poster) = self { return poster }
-        return false
+        switch self {
+        case .dir(_, _, _, _, let poster):  return poster
+        case .file(_, _, _, _, let poster): return poster
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -124,7 +128,8 @@ enum RecentItem: Decodable, Identifiable, Hashable {
         switch kind {
         case "dir":
             self = .dir(name: name, vpath: vpath, mtime: mtime,
-                        children: try c.decode(Int.self, forKey: .children))
+                        children: try c.decode(Int.self, forKey: .children),
+                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
         case "file":
             self = .file(name: name, vpath: vpath, mtime: mtime,
                          size: try c.decode(UInt64.self, forKey: .size),

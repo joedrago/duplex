@@ -42,6 +42,9 @@ pub enum Entry {
         /// the maximum mtime of any descendant file — so freshly added
         /// files inside subtrees bubble up.
         mtime: i64,
+        /// Whether a poster image is available for this directory (its own
+        /// sidecar `.jpg` or an inherited ancestor poster).
+        poster: bool,
     },
     File {
         name: String,
@@ -113,6 +116,7 @@ pub async fn browse(
                 name: name.clone(),
                 children: d.children.len(),
                 mtime: epoch_seconds(d.mtime),
+                poster: d.poster.is_some() || inherited_poster,
             }),
             Node::File(f) => {
                 entries.push(Entry::File {

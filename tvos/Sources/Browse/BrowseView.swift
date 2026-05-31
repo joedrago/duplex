@@ -250,8 +250,13 @@ struct BrowseView: View {
     private func posterCell(for entry: Entry) -> some View {
         let isFocused = focusedKey == .entry(entry.name)
         switch entry {
-        case .dir(let name, _, _):
-            PosterCell(url: nil, fallbackGlyph: "📁", title: name, isFocused: isFocused)
+        case .dir(let name, _, _, let hasPoster):
+            PosterCell(
+                url: hasPoster ? client.posterURL(path: subpath(name)) : nil,
+                fallbackGlyph: "📁",
+                title: name,
+                isFocused: isFocused
+            )
         case .file(let name, _, _, _, let hasPoster):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: subpath(name)) : nil,
@@ -334,7 +339,7 @@ struct BrowseView: View {
     private func row(for entry: Entry) -> some View {
         let isFocused = focusedKey == .entry(entry.name)
         switch entry {
-        case .dir(let name, let children, let mtime):
+        case .dir(let name, let children, let mtime, _):
             GridEntryRow(
                 icon: "📁",
                 title: name,

@@ -142,7 +142,9 @@ struct PosterCell: View {
                 .shadow(color: .black.opacity(isFocused ? 0.5 : 0), radius: 12, y: 6)
 
             VStack(spacing: 2) {
-                Text(title)
+                // Lead the caption with the type glyph (📁 / 🎬 / 🍿) so a folder
+                // showing its own poster art is still unmistakably a folder.
+                Text("\(fallbackGlyph)  \(title)")
                     .font(.system(size: 15, weight: isFocused ? .semibold : .medium))
                     .foregroundStyle(isFocused ? DuplexColor.fg : DuplexColor.muted)
                     .lineLimit(2)
