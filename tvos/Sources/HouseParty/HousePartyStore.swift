@@ -55,6 +55,16 @@ final class HousePartyStore: ObservableObject {
 
     private var pollTask: Task<Void, Never>?
 
+    /// When true, polling is suspended — no network call, and crucially no
+    /// republish of `latest`. Home sets this while a confirm/delete dialog is
+    /// open: the 1 Hz republish (which fires even when the state is unchanged)
+    /// would otherwise re-render Home and re-present the alert, stealing focus
+    /// back from the user's selection every second.
+    private var pollPaused = false
+
+    func pausePolling() { pollPaused = true }
+    func resumePolling() { pollPaused = false }
+
     private init() {
         startPolling()
     }
@@ -125,6 +135,7 @@ final class HousePartyStore: ObservableObject {
     }
 
     private func pollOnce() async {
+        if pollPaused { return }
         do {
             let state = try await client.housePartyState()
             latest = state

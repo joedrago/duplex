@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::library::{
-    recompute_dir_mtimes, Dir, File, Library, Node, Root, Sidecar, Tree, SUB_EXTS, VIDEO_EXTS,
+    recompute_dir_mtimes, Dir, File, Library, Node, Root, Sidecar, Tree, POSTER_EXTS, SUB_EXTS,
+    VIDEO_EXTS,
 };
 
 /// Build a fresh Tree by walking every configured root.
@@ -83,6 +84,7 @@ pub fn upsert_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
             size: meta.len(),
             mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             sidecars: Vec::new(),
+            poster: None,
         };
         cur.children.insert(leaf, Node::File(file));
         // Re-bind sidecars for the parent directory after a change.
@@ -162,36 +164,43 @@ fn scan_dir(abs: &Path, out: &mut Dir) {
                 size: meta.len(),
                 mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 sidecars: Vec::new(),
+                poster: None,
             };
             out.children.insert(name, Node::File(file));
         }
     }
 }
 
-/// Walk a single directory level and bind sidecars (text subtitle files)
-/// to their matching video files by stem.
+/// Walk a single directory level and bind sidecars (text subtitle files and a
+/// poster image) to their matching video files by stem.
 fn attach_sidecars(dir: &mut Dir) {
     // Index sidecars in this directory keyed by stem.
     let mut sidecars: BTreeMap<String, Vec<Sidecar>> = BTreeMap::new();
-    let mut to_drop_sub_names: Vec<String> = Vec::new();
+    // Poster images keyed by exact stem (`Movie.jpg` -> "Movie").
+    let mut posters: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut to_drop_names: Vec<String> = Vec::new();
     for (name, node) in &dir.children {
         if let Node::File(f) = node {
             let Some(ext) = &f.ext else { continue };
-            if !SUB_EXTS.contains(&ext.as_str()) {
-                continue;
+            if SUB_EXTS.contains(&ext.as_str()) {
+                let stem = strip_lang_and_ext(name);
+                let lang = extract_lang(name);
+                sidecars.entry(stem.to_string()).or_default().push(Sidecar {
+                    abs_path: f.abs_path.clone(),
+                    format: ext.clone(),
+                    language: lang,
+                });
+                to_drop_names.push(name.clone());
+            } else if POSTER_EXTS.contains(&ext.as_str()) {
+                // Last writer wins if two extensions share a stem; rare.
+                posters.insert(strip_ext(name).to_string(), f.abs_path.clone());
+                to_drop_names.push(name.clone());
             }
-            let stem = strip_lang_and_ext(name);
-            let lang = extract_lang(name);
-            sidecars.entry(stem.to_string()).or_default().push(Sidecar {
-                abs_path: f.abs_path.clone(),
-                format: ext.clone(),
-                language: lang,
-            });
-            to_drop_sub_names.push(name.clone());
         }
     }
 
-    // Attach sidecars to matching video files (by file-name-without-ext).
+    // Attach sidecars and a poster to matching video files (by file-name-
+    // without-ext).
     for (name, node) in dir.children.iter_mut() {
         if let Node::File(f) = node {
             let Some(ext) = &f.ext else { continue };
@@ -202,12 +211,15 @@ fn attach_sidecars(dir: &mut Dir) {
             if let Some(subs) = sidecars.get(stem) {
                 f.sidecars = subs.clone();
             }
+            if let Some(poster) = posters.get(stem) {
+                f.poster = Some(poster.clone());
+            }
         }
     }
 
-    // Drop the subtitle file nodes from the directory listing — they're
-    // not browsable on their own; they ride on the video.
-    for n in to_drop_sub_names {
+    // Drop the sidecar (subtitle + poster) file nodes from the directory
+    // listing — they're not browsable on their own; they ride on the video.
+    for n in to_drop_names {
         dir.children.remove(&n);
     }
 }
@@ -228,6 +240,8 @@ fn classify(ext: &Option<String>) -> Option<Kind> {
         Some(Kind::Video)
     } else if SUB_EXTS.contains(&e) {
         Some(Kind::Subtitle)
+    } else if POSTER_EXTS.contains(&e) {
+        Some(Kind::Poster)
     } else {
         None
     }
@@ -236,6 +250,7 @@ fn classify(ext: &Option<String>) -> Option<Kind> {
 enum Kind {
     Video,
     Subtitle,
+    Poster,
 }
 
 fn strip_ext(name: &str) -> &str {

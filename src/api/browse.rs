@@ -48,6 +48,8 @@ pub enum Entry {
         ext: Option<String>,
         size: u64,
         mtime: i64,
+        /// Whether a sidecar poster image is available via `/api/poster`.
+        poster: bool,
     },
 }
 
@@ -114,6 +116,7 @@ pub async fn browse(
                     ext: f.ext.clone(),
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
+                    poster: f.poster.is_some(),
                 });
             }
         }

@@ -9,21 +9,21 @@ struct BrowseResponse: Decodable {
 
 enum Entry: Decodable, Identifiable, Hashable {
     case dir(name: String, children: Int, mtime: Int64)
-    case file(name: String, ext: String?, size: UInt64, mtime: Int64)
+    case file(name: String, ext: String?, size: UInt64, mtime: Int64, poster: Bool)
 
     var id: String { name }
 
     var name: String {
         switch self {
         case .dir(let n, _, _): return n
-        case .file(let n, _, _, _): return n
+        case .file(let n, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
         case .dir(_, _, let m): return m
-        case .file(_, _, _, let m): return m
+        case .file(_, _, _, let m, _): return m
         }
     }
 
@@ -32,8 +32,15 @@ enum Entry: Decodable, Identifiable, Hashable {
         return false
     }
 
+    /// Whether a sidecar poster image is available for this file (always false
+    /// for directories).
+    var hasPoster: Bool {
+        if case .file(_, _, _, _, let poster) = self { return poster }
+        return false
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case kind, name, children, mtime, ext, size
+        case kind, name, children, mtime, ext, size, poster
     }
 
     init(from decoder: Decoder) throws {
@@ -50,7 +57,8 @@ enum Entry: Decodable, Identifiable, Hashable {
             self = .file(name: name,
                          ext: try c.decodeIfPresent(String.self, forKey: .ext),
                          size: try c.decode(UInt64.self, forKey: .size),
-                         mtime: mtime)
+                         mtime: mtime,
+                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")
@@ -66,28 +74,28 @@ struct RecentResponse: Decodable {
 
 enum RecentItem: Decodable, Identifiable, Hashable {
     case dir(name: String, vpath: String, mtime: Int64, children: Int)
-    case file(name: String, vpath: String, mtime: Int64, size: UInt64)
+    case file(name: String, vpath: String, mtime: Int64, size: UInt64, poster: Bool)
 
     var id: String { vpath }
 
     var vpath: String {
         switch self {
         case .dir(_, let v, _, _): return v
-        case .file(_, let v, _, _): return v
+        case .file(_, let v, _, _, _): return v
         }
     }
 
     var name: String {
         switch self {
         case .dir(let n, _, _, _): return n
-        case .file(let n, _, _, _): return n
+        case .file(let n, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
         case .dir(_, _, let m, _): return m
-        case .file(_, _, let m, _): return m
+        case .file(_, _, let m, _, _): return m
         }
     }
 
@@ -96,8 +104,15 @@ enum RecentItem: Decodable, Identifiable, Hashable {
         return false
     }
 
+    /// Whether a sidecar poster image is available for this file (always false
+    /// for directories).
+    var hasPoster: Bool {
+        if case .file(_, _, _, _, let poster) = self { return poster }
+        return false
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case kind, name, vpath, mtime, children, size
+        case kind, name, vpath, mtime, children, size, poster
     }
 
     init(from decoder: Decoder) throws {
@@ -112,7 +127,8 @@ enum RecentItem: Decodable, Identifiable, Hashable {
                         children: try c.decode(Int.self, forKey: .children))
         case "file":
             self = .file(name: name, vpath: vpath, mtime: mtime,
-                         size: try c.decode(UInt64.self, forKey: .size))
+                         size: try c.decode(UInt64.self, forKey: .size),
+                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")

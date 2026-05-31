@@ -15,6 +15,7 @@ pub mod flatten;
 pub mod houseparty;
 pub mod manifest;
 pub mod next;
+pub mod poster;
 pub mod raw;
 pub mod recent;
 pub mod search;
@@ -48,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .merge(browse::routes())
         .merge(manifest::routes())
         .merge(raw::routes())
+        .merge(poster::routes())
         .merge(sidecar::routes())
         .merge(recent::routes())
         .merge(next::routes())

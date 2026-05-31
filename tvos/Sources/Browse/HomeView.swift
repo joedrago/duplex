@@ -60,7 +60,7 @@ struct HomeView: View {
     @EnvironmentObject private var nav: NavCoordinator
     @ObservedObject private var resume = ResumeStore.shared
     @ObservedObject private var binges = BingeStore.shared
-    @ObservedObject private var sort = SortPreference.shared
+    @ObservedObject private var viewPref = ViewPreference.shared
     @ObservedObject private var houseParty = HousePartyStore.shared
     @ObservedObject private var ext = ExtensionPreference.shared
 
@@ -82,7 +82,8 @@ struct HomeView: View {
                 isActive: dialog == nil,
                 onActivate: handleActivate,
                 onLongSelect: handleLongSelect,
-                onPlayPause: { sort.toggle() }
+                onPlayPause: { viewPref.cycle() },
+                crossNavigate: posterCrossNavigate
             ) {
                 HStack(alignment: .top, spacing: DuplexMetric.columnGap) {
                     librariesColumn
@@ -98,6 +99,13 @@ struct HomeView: View {
         .ignoresSafeArea()
         .navigationBarHidden(true)
         .alert(item: $dialog) { d in bingeAlert(d) }
+        .onChange(of: dialog == nil) { _, isNil in
+            // Freeze the 1 Hz House Party poll while a dialog is up; its republish
+            // would otherwise re-render Home and re-present the alert, yanking
+            // focus off the user's selection every second.
+            if isNil { houseParty.resumePolling() } else { houseParty.pausePolling() }
+        }
+        .onDisappear { houseParty.resumePolling() }
         .task {
             await vm.load()
             applyInitialFocusIfNeeded()
@@ -135,12 +143,27 @@ struct HomeView: View {
     /// Drives `WrapColumns`. Order here matches the visual HStack so left/right
     /// arrows cross between adjacent columns naturally. The third column stacks
     /// binges above Continue Watching, so up/down flows through both.
+    /// Fixed column count for the Home content mini-grids (each content column
+    /// is only ~⅓ of the screen wide).
+    private static let homePosterCols = 3
+
     private var focusColumns: [[HomeFocus]] {
         let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.houseParty, .settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
-        let bingeKeys: [HomeFocus] = bingeItems.map { .binge($0.id) }
-        let conKeys: [HomeFocus] = continueItems.map { .continueWatching($0.vpath) }
-        return [libKeys, recKeys, bingeKeys + conKeys]
+        let bcKeys: [HomeFocus] = bingeItems.map { .binge($0.id) } + continueItems.map { .continueWatching($0.vpath) }
+        if viewPref.layout == .posters {
+            // Libraries stays a single list column; the two content columns each
+            // expand into a row-major 2-wide grid so Left/Right walks the grid.
+            return [libKeys]
+                + posterStridedColumns(recKeys, cols: Self.homePosterCols)
+                + posterStridedColumns(bcKeys, cols: Self.homePosterCols)
+        }
+        return [libKeys, recKeys, bcKeys]
+    }
+
+    /// Two flexible columns for the Home content poster grids.
+    private var homeGridItems: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: Self.homePosterCols)
     }
 
     // MARK: actions
@@ -151,14 +174,14 @@ struct HomeView: View {
             if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
                 case .dir(let n, _, _):           nav.push(.browse(path: n))
-                case .file(let n, _, _, _):    nav.play(vpath: n)
+                case .file(let n, _, _, _, _):    nav.play(vpath: n)
                 }
             }
         case .recent(let id):
             if let item = recentItems.first(where: { $0.id == id }) {
                 switch item {
                 case .dir(_, let vpath, _, _):    nav.push(.browse(path: vpath))
-                case .file(_, let vpath, _, _):   nav.play(vpath: vpath)
+                case .file(_, let vpath, _, _, _):   nav.play(vpath: vpath)
                 }
             }
         case .binge(let id):
@@ -292,7 +315,8 @@ struct HomeView: View {
     private var librariesColumn: some View {
         Column(
             title: "Libraries",
-            scrollAnchor: anchorFor(columnIndex: 0)
+            scrollAnchor: anchor(in: .libraries),
+            scrollToTop: pinTop(in: .libraries)
         ) {
             searchRow
                 .id(HomeFocus.search)
@@ -368,7 +392,7 @@ struct HomeView: View {
                 meta: "\(children) entries",
                 isFocused: focus == key
             )
-        case .file(let name, _, let size, _):
+        case .file(let name, _, let size, _, _):
             GridEntryRow(
                 icon: "🎬",
                 title: DuplexFormat.displayFileName(name),
@@ -390,7 +414,7 @@ struct HomeView: View {
     }
 
     private var recentColumn: some View {
-        Column(title: "Recently Added", scrollAnchor: anchorFor(columnIndex: 1)) {
+        Column(title: "Recently Added", scrollAnchor: anchor(in: .recent), scrollToTop: pinTop(in: .recent)) {
             switch vm.recent {
             case .idle, .loading:
                 LoadingColumn()
@@ -400,6 +424,15 @@ struct HomeView: View {
                 let items = recentItems
                 if items.isEmpty {
                     EmptyColumn(icon: "💤", title: "Nothing new", hint: "")
+                } else if viewPref.layout == .posters {
+                    LazyVGrid(columns: homeGridItems, spacing: 18) {
+                        ForEach(items, id: \.id) { item in
+                            recentPosterCell(item)
+                                .id(HomeFocus.recent(item.id))
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
                 } else {
                     ForEach(items, id: \.id) { item in
                         recentRow(item)
@@ -407,6 +440,22 @@ struct HomeView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func recentPosterCell(_ item: RecentItem) -> some View {
+        let isFocused = focus == .recent(item.id)
+        switch item {
+        case .dir(let name, _, _, _):
+            PosterCell(url: nil, fallbackGlyph: "📁", title: name, isFocused: isFocused)
+        case .file(let name, let vpath, _, _, let hasPoster):
+            PosterCell(
+                url: hasPoster ? client.posterURL(path: vpath) : nil,
+                fallbackGlyph: "🎬",
+                title: DuplexFormat.displayFileName(name),
+                isFocused: isFocused
+            )
         }
     }
 
@@ -423,7 +472,7 @@ struct HomeView: View {
                 meta: "\(children) · \(DuplexFormat.relative(mtime))",
                 isFocused: focus == key
             )
-        case .file(let name, _, let mtime, let size):
+        case .file(let name, _, let mtime, let size, _):
             GridEntryRow(
                 icon: "🎬",
                 title: DuplexFormat.displayFileName(name),
@@ -434,15 +483,73 @@ struct HomeView: View {
         }
     }
 
+    /// The third column mixes binges and Continue Watching; title it for
+    /// whatever it actually holds so it doesn't read "Binges" when there are
+    /// none.
+    private var continueColumnTitle: String {
+        switch (bingeItems.isEmpty, continueItems.isEmpty) {
+        case (false, false): return "Binges & Continue"
+        case (false, true):  return "Binges"
+        default:             return "Continue Watching"
+        }
+    }
+
     private var continueColumn: some View {
-        Column(title: "Binges", scrollAnchor: anchorFor(columnIndex: 2)) {
-            bingeSection
-            Rectangle()
-                .fill(DuplexColor.border)
-                .frame(height: 1)
-                .padding(.vertical, 6)
-            sectionHeader("Continue Watching")
-            continueSection
+        Column(title: continueColumnTitle, scrollAnchor: anchor(in: .bingeContinue), scrollToTop: pinTop(in: .bingeContinue)) {
+            if viewPref.layout == .posters {
+                bingeContinuePosterGrid
+            } else {
+                bingeSection
+                Rectangle()
+                    .fill(DuplexColor.border)
+                    .frame(height: 1)
+                    .padding(.vertical, 6)
+                // Sub-header only when binges sit above it; otherwise the column
+                // title already reads "Continue Watching" and a matching
+                // sub-header would just double the label.
+                if !bingeItems.isEmpty {
+                    sectionHeader("Continue Watching")
+                }
+                continueSection
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bingeContinuePosterGrid: some View {
+        let binges = bingeItems
+        let cont = continueItems
+        if binges.isEmpty && cont.isEmpty {
+            EmptyColumn(icon: "🍿", title: "Nothing here yet", hint: "Hold ✓ on a folder to binge it.")
+        } else {
+            LazyVGrid(columns: homeGridItems, spacing: 18) {
+                ForEach(binges) { binge in
+                    let isFocused = focus == .binge(binge.id)
+                    let front = binge.front ?? ""
+                    PosterCell(
+                        url: front.isEmpty ? nil : client.posterURL(path: front),
+                        fallbackGlyph: "🍿",
+                        title: binge.origin,
+                        subtitle: "\(binge.remaining) left",
+                        isFocused: isFocused
+                    )
+                    .id(HomeFocus.binge(binge.id))
+                }
+                ForEach(cont, id: \.vpath) { item in
+                    let isFocused = focus == .continueWatching(item.vpath)
+                    let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
+                    PosterCell(
+                        url: client.posterURL(path: item.vpath),
+                        fallbackGlyph: "🎬",
+                        title: DuplexFormat.displayFileLeaf(of: item.vpath),
+                        progress: progress,
+                        isFocused: isFocused
+                    )
+                    .id(HomeFocus.continueWatching(item.vpath))
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
         }
     }
 
@@ -519,7 +626,7 @@ struct HomeView: View {
     private var footerHint: some View {
         HStack(spacing: 18) {
             Spacer()
-            Text("▶︎❙❙  Sort: \(sort.mode.label)")
+            Text("▶︎❙❙  View: \(viewPref.label)")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(DuplexColor.muted)
             if let hint = holdHint {
@@ -538,21 +645,75 @@ struct HomeView: View {
         .padding(.bottom, 14)
     }
 
-    /// Returns the focus key if it's in the given column — used to drive each
-    /// `Column`'s ScrollViewReader so the focused row stays in view.
-    private func anchorFor(columnIndex: Int) -> AnyHashable? {
-        guard let f = focus else { return nil }
-        let cols = focusColumns
-        guard columnIndex >= 0 && columnIndex < cols.count else { return nil }
-        return cols[columnIndex].contains(f) ? AnyHashable(f) : nil
+    /// Grid-aware Down within the poster mini-grids: dropping off the bottom of
+    /// a short column lands on the last item (down-and-left) rather than
+    /// wrapping. Each content grid is handled independently; Libraries (a list)
+    /// and all other directions keep WrapColumns' defaults.
+    private func posterCrossNavigate(_ cur: HomeFocus, _ dir: WrapColumnsCrossDirection) -> HomeFocus? {
+        guard viewPref.layout == .posters, dir == .down || dir == .up else { return nil }
+        let cols = Self.homePosterCols
+        let keys: [HomeFocus]
+        switch cur {
+        case .recent:
+            keys = recentItems.map { HomeFocus.recent($0.id) }
+        case .binge, .continueWatching:
+            keys = bingeItems.map { HomeFocus.binge($0.id) }
+                + continueItems.map { HomeFocus.continueWatching($0.vpath) }
+        default:
+            return nil // Libraries (a list) keeps WrapColumns' defaults.
+        }
+        return dir == .down
+            ? posterGridDownTarget(keys, from: cur, cols: cols)
+            : posterGridUpTarget(keys, from: cur, cols: cols)
     }
 
-    private func sortEntries(_ entries: [Entry]) -> [Entry] {
-        switch sort.mode {
-        case .name:
-            return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    /// The three visual columns, identified by which focus keys belong to them.
+    /// Membership is layout-independent, so this drives each `Column`'s scroll
+    /// anchor whether the content columns are lists or poster mini-grids.
+    private enum HomeColumn { case libraries, recent, bingeContinue }
+
+    private func belongs(_ f: HomeFocus, to col: HomeColumn) -> Bool {
+        switch col {
+        case .libraries:
+            switch f {
+            case .search, .library, .houseParty, .settings: return true
+            default: return false
+            }
         case .recent:
-            return entries.sorted { $0.mtime > $1.mtime }
+            if case .recent = f { return true }
+            return false
+        case .bingeContinue:
+            switch f {
+            case .binge, .continueWatching: return true
+            default: return false
+            }
+        }
+    }
+
+    /// Returns the focused key if it lives in `col`, so that column's
+    /// ScrollViewReader keeps it in view.
+    private func anchor(in col: HomeColumn) -> AnyHashable? {
+        guard let f = focus, belongs(f, to: col) else { return nil }
+        return AnyHashable(f)
+    }
+
+    /// True when the focused item sits in `col`'s first row, so the column
+    /// should scroll fully to the top rather than doing a minimal reveal.
+    private func pinTop(in col: HomeColumn) -> Bool {
+        guard let f = focus, belongs(f, to: col) else { return false }
+        let cols = viewPref.layout == .posters ? Self.homePosterCols : 1
+        switch col {
+        case .libraries:
+            return f == .search
+        case .recent:
+            guard case .recent(let id) = f,
+                  let idx = recentItems.firstIndex(where: { $0.id == id }) else { return false }
+            return idx < cols
+        case .bingeContinue:
+            let keys = bingeItems.map { HomeFocus.binge($0.id) }
+                + continueItems.map { HomeFocus.continueWatching($0.vpath) }
+            guard let idx = keys.firstIndex(of: f) else { return false }
+            return idx < cols
         }
     }
 }

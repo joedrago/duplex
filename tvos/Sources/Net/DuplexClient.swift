@@ -98,6 +98,12 @@ struct DuplexClient {
         url("/api/sidecar", query: ["path": path, "index": String(index)])
     }
 
+    /// `/api/poster?path=<video vpath>` — the sidecar poster image for a video.
+    /// 404s when the video has no poster; callers fall back to a placeholder.
+    func posterURL(path: String) -> URL {
+        url("/api/poster", query: ["path": path])
+    }
+
     // MARK: internals
 
     private func url(_ pathComponent: String, query: [String: String]) -> URL {

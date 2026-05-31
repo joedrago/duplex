@@ -2,8 +2,10 @@ import SwiftUI
 
 /// Direction passed to `WrapColumns.crossNavigate`. Top-level rather than
 /// nested inside the generic struct so callers can write the closure type
-/// without binding to a specific `WrapColumns` specialization.
-enum WrapColumnsCrossDirection { case left, right }
+/// without binding to a specific `WrapColumns` specialization. Includes the
+/// vertical directions so callers can override up/down too (e.g. grid layouts
+/// that want to drop diagonally into a partial last row instead of wrapping).
+enum WrapColumnsCrossDirection { case left, right, up, down }
 
 /// Reusable multi-column focus grid for tvOS.
 ///
@@ -68,7 +70,18 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
             .onChange(of: columns) { _, _ in ensureValidFocus() }
     }
 
-    private enum Dir { case up, down, left, right }
+    private enum Dir {
+        case up, down, left, right
+
+        var crossDir: WrapColumnsCrossDirection {
+            switch self {
+            case .up: return .up
+            case .down: return .down
+            case .left: return .left
+            case .right: return .right
+            }
+        }
+    }
 
     private func ensureValidFocus() {
         if let cur = current, columns.contains(where: { $0.contains(cur) }) { return }
@@ -84,6 +97,15 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
             return
         }
         let col = columns[colIdx]
+        // The caller gets first say. For up/down this lets a grid layout drop
+        // diagonally into a partial last row; for left/right it remaps
+        // cross-column jumps (e.g. list ↔ alphabet rail). Only on a tap
+        // (wrap == true) — during auto-repeat scrolling we keep the
+        // clamp-at-ends behavior. (Left/right are always taps.)
+        if wrap, let o = crossOverride(from: cur, dir.crossDir) {
+            current = o
+            return
+        }
         switch dir {
         case .up:
             if rowIdx == 0 {
@@ -98,9 +120,9 @@ struct WrapColumns<Key: Hashable, Content: View>: View {
                 current = col[rowIdx + 1]
             }
         case .left:
-            current = crossOverride(from: cur, .left) ?? peerKey(rowIdx: rowIdx, col: colIdx - 1) ?? cur
+            current = peerKey(rowIdx: rowIdx, col: colIdx - 1) ?? cur
         case .right:
-            current = crossOverride(from: cur, .right) ?? peerKey(rowIdx: rowIdx, col: colIdx + 1) ?? cur
+            current = peerKey(rowIdx: rowIdx, col: colIdx + 1) ?? cur
         }
     }
 

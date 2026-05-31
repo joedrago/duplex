@@ -1,23 +1,34 @@
 import SwiftUI
 
 struct Column<Content: View>: View {
+    /// Top-of-content anchor, used to pin the scroll to the very top (showing
+    /// the leading padding) when focus enters the first row — `scrollTo` with no
+    /// anchor would otherwise land the first row flush against the clip edge,
+    /// hiding the padding and clipping the focus-scale above it.
+    private static var topAnchorID: String { "duplex.column.top" }
+
     let title: String
     /// Optional badge shown next to the title (e.g. the current sort mode).
     let badge: String?
-    /// When set and non-nil, the column's ScrollView scrolls so this view's
-    /// `.id(_:)`-matched row is centered. Use this to follow focus changes.
+    /// When set and non-nil, the column's ScrollView scrolls the minimum needed
+    /// to reveal this view's `.id(_:)`-matched row (no-op when already visible).
     let scrollAnchor: AnyHashable?
+    /// When true, the next anchor change scrolls fully to the top instead of
+    /// doing a minimal reveal — used when focus is in the first row.
+    let scrollToTop: Bool
     @ViewBuilder let content: () -> Content
 
     init(
         title: String,
         badge: String? = nil,
         scrollAnchor: AnyHashable? = nil,
+        scrollToTop: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.badge = badge
         self.scrollAnchor = scrollAnchor
+        self.scrollToTop = scrollToTop
         self.content = content
     }
 
@@ -49,14 +60,25 @@ struct Column<Content: View>: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        // Leading breathing room, revealed when pinned to top so
+                        // the first row's focus-scale isn't clipped.
+                        Color.clear.frame(height: 12).id(Self.topAnchorID)
                         content()
                     }
-                    .padding(.vertical, 4)
+                    .padding(.bottom, 4)
                 }
                 .onChange(of: scrollAnchor) { _, new in
                     guard let new else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(new, anchor: .center)
+                        if scrollToTop {
+                            // First row: go fully to the top so the leading
+                            // padding shows and nothing clips above the poster.
+                            proxy.scrollTo(Self.topAnchorID, anchor: .top)
+                        } else {
+                            // No anchor → minimal reveal; no-op when already
+                            // visible (avoids jittery re-centering).
+                            proxy.scrollTo(new)
+                        }
                     }
                 }
             }

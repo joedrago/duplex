@@ -51,6 +51,8 @@ pub enum Item {
         vpath: String,
         mtime: i64,
         size: u64,
+        /// Whether a sidecar poster image is available via `/api/poster`.
+        poster: bool,
     },
 }
 
@@ -92,6 +94,7 @@ pub async fn recent(
                     vpath,
                     mtime: epoch_seconds(f.mtime),
                     size: f.size,
+                    poster: f.poster.is_some(),
                 }),
             }
         }

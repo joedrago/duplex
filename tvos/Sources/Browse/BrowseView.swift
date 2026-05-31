@@ -40,11 +40,16 @@ struct BrowseView: View {
     let dirPath: String
 
     @StateObject private var vm = BrowseViewModel()
-    @ObservedObject private var sort = SortPreference.shared
+    @ObservedObject private var viewPref = ViewPreference.shared
     @ObservedObject private var ext = ExtensionPreference.shared
     @EnvironmentObject private var nav: NavCoordinator
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
+
+    // Measured interior width of the poster panel, used to choose the grid's
+    // column count. Both the visual `LazyVGrid` and the WrapColumns focus
+    // topology derive their column count from this, so they stay in lockstep.
+    @State private var gridWidth: CGFloat = 0
 
     private let client = DuplexClient()
 
@@ -67,7 +72,7 @@ struct BrowseView: View {
                 isActive: dialog == nil,
                 onActivate: handleActivate,
                 onLongSelect: handleLongSelect,
-                onPlayPause: { sort.toggle() },
+                onPlayPause: { viewPref.cycle() },
                 onMenuTap: { nav.path.removeLast() },
                 crossNavigate: crossNavigate
             ) {
@@ -107,14 +112,8 @@ struct BrowseView: View {
             applyInitialFocusIfNeeded()
         }
         .onChange(of: sortedEntryNames) { _, _ in applyInitialFocusIfNeeded() }
-        .onChange(of: sort.mode) { _, _ in
-            // Sort toggle reshuffles the list — snap focus to the top of the
-            // new ordering rather than leaving the user mid-list at a row
-            // whose neighbors have changed underneath them.
-            if let first = sortedEntryNames.first {
-                focusedKey = .entry(first)
-            }
-        }
+        .onChange(of: viewPref.sort) { _, _ in snapFocusToTop() }
+        .onChange(of: viewPref.layout) { _, _ in snapFocusToTop() }
         .onChange(of: focusedKey) { _, new in
             if case .entry(let name) = new { lastEntryFocus = name }
         }
@@ -155,15 +154,27 @@ struct BrowseView: View {
     /// ordering to jump within, and when there are enough buckets that jumping
     /// is actually faster than scrolling.
     private var showRail: Bool {
-        sort.mode == .name && availableLetters.count >= 3
+        viewPref.layout == .list && viewPref.sort == .name && availableLetters.count >= 3
     }
 
     private var focusColumns: [[BrowseFocus]] {
-        let entryCol = sortedEntryNames.map { BrowseFocus.entry($0) }
-        if showRail {
-            return [entryCol, availableLetters.map { BrowseFocus.letter($0) }]
+        let entryKeys = sortedEntryNames.map { BrowseFocus.entry($0) }
+        if viewPref.layout == .posters {
+            // Strided columns mirror the row-major LazyVGrid, so WrapColumns'
+            // left/right + up/down give true 2D grid navigation. No rail.
+            return posterStridedColumns(entryKeys, cols: posterCols)
         }
-        return [entryCol]
+        if showRail {
+            return [entryKeys, availableLetters.map { BrowseFocus.letter($0) }]
+        }
+        return [entryKeys]
+    }
+
+    /// Number of poster columns that fit the measured panel interior.
+    private var posterCols: Int { PosterMetric.columnCount(forWidth: gridWidth) }
+
+    private func snapFocusToTop() {
+        if let first = sortedEntryNames.first { focusedKey = .entry(first) }
     }
 
     // MARK: - layout
@@ -176,12 +187,78 @@ struct BrowseView: View {
         case .failed(let m):
             ColumnError(message: m).frame(maxHeight: .infinity)
         case .loaded:
-            HStack(alignment: .top, spacing: 16) {
-                list(entries: sortedEntries)
-                if showRail {
-                    letterRail
+            if viewPref.layout == .posters {
+                posterList(entries: sortedEntries)
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    list(entries: sortedEntries)
+                    if showRail {
+                        letterRail
+                    }
                 }
             }
+        }
+    }
+
+    // MARK: - posters
+
+    private func posterList(entries: [Entry]) -> some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(DuplexColor.border).frame(height: 1)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if entries.isEmpty {
+                        EmptyColumn(icon: "📭", title: "Empty", hint: "Nothing in this folder.")
+                    } else {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: PosterMetric.spacing),
+                                count: posterCols
+                            ),
+                            spacing: 28
+                        ) {
+                            ForEach(entries, id: \.id) { entry in
+                                posterCell(for: entry).id(entry.name)
+                            }
+                        }
+                        .padding(20)
+                    }
+                }
+                .onChange(of: focusedKey) { _, new in
+                    guard case .entry(let name) = new else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(name, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(DuplexColor.panel)
+        .clipShape(RoundedRectangle(cornerRadius: DuplexMetric.panelRadius))
+        .background(
+            GeometryReader { g in
+                Color.clear.onChange(of: g.size.width, initial: true) { _, w in
+                    // Subtract the grid's own 20pt inset on each side.
+                    let usable = w - 40
+                    if abs(gridWidth - usable) > 1 { gridWidth = usable }
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func posterCell(for entry: Entry) -> some View {
+        let isFocused = focusedKey == .entry(entry.name)
+        switch entry {
+        case .dir(let name, _, _):
+            PosterCell(url: nil, fallbackGlyph: "📁", title: name, isFocused: isFocused)
+        case .file(let name, _, _, _, let hasPoster):
+            PosterCell(
+                url: hasPoster ? client.posterURL(path: subpath(name)) : nil,
+                fallbackGlyph: "🎬",
+                title: DuplexFormat.displayFileName(name),
+                isFocused: isFocused
+            )
         }
     }
 
@@ -262,17 +339,17 @@ struct BrowseView: View {
                 icon: "📁",
                 title: name,
                 subtitle: nil,
-                meta: sort.mode == .recent
+                meta: viewPref.sort == .recent
                     ? "\(children) · \(DuplexFormat.relative(mtime))"
                     : "\(children) entries",
                 isFocused: isFocused
             )
-        case .file(let name, _, let size, let mtime):
+        case .file(let name, _, let size, let mtime, _):
             GridEntryRow(
                 icon: "🎬",
                 title: DuplexFormat.displayFileName(name),
                 subtitle: nil,
-                meta: sort.mode == .recent
+                meta: viewPref.sort == .recent
                     ? "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))"
                     : DuplexFormat.size(size),
                 isFocused: isFocused
@@ -292,6 +369,18 @@ struct BrowseView: View {
     ///   (tracked in `lastEntryFocus`), so the rail acts as a scratchpad
     ///   without yanking the list cursor to some unrelated row.
     private func crossNavigate(_ current: BrowseFocus, _ dir: WrapColumnsCrossDirection) -> BrowseFocus? {
+        // Poster grid: grid-aware Down/Up (drop into / wrap up to the partial
+        // last row instead of skipping it). There's no alphabet rail in poster
+        // mode, so no other cross-navigation applies.
+        if viewPref.layout == .posters {
+            guard case .entry = current else { return nil }
+            let keys = sortedEntryNames.map { BrowseFocus.entry($0) }
+            switch dir {
+            case .down: return posterGridDownTarget(keys, from: current, cols: posterCols)
+            case .up:   return posterGridUpTarget(keys, from: current, cols: posterCols)
+            default:    return nil
+            }
+        }
         switch (current, dir) {
         case (.entry(let name), .right):
             let letter = firstLetter(of: name)
@@ -362,7 +451,7 @@ struct BrowseView: View {
     private var footerHint: some View {
         HStack(spacing: 18) {
             Spacer()
-            Text("▶︎❙❙  Sort: \(sort.mode.label)")
+            Text("▶︎❙❙  View: \(viewPref.label)")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(DuplexColor.muted)
             if isDirFocused {
@@ -383,7 +472,7 @@ struct BrowseView: View {
     }
 
     private func sortedEntriesList(_ entries: [Entry]) -> [Entry] {
-        switch sort.mode {
+        switch viewPref.sort {
         case .name:
             return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case .recent:

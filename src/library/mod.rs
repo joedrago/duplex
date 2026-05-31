@@ -16,6 +16,9 @@ pub const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "webm", "m4v"];
 /// Recognised sidecar subtitle extensions.
 pub const SUB_EXTS: &[&str] = &["srt", "vtt", "ass"];
 
+/// Recognised sidecar poster image extensions (always JPEG internally).
+pub const POSTER_EXTS: &[&str] = &["jpg", "jpeg"];
+
 /// One library root, addressed by its virtual name (basename by default).
 #[derive(Debug, Clone)]
 pub struct Root {
@@ -60,6 +63,10 @@ pub struct File {
     pub mtime: SystemTime,
     /// Sidecar subtitle files (siblings sharing the same stem).
     pub sidecars: Vec<Sidecar>,
+    /// Sidecar poster image (a sibling `.jpg`/`.jpeg` sharing the same stem),
+    /// if one exists. Served by `/api/poster`; only its presence reaches the
+    /// wire (as a `poster: bool` flag on browse/recent file entries).
+    pub poster: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
