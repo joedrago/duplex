@@ -42,6 +42,12 @@ pub struct Dir {
     /// the watcher. Used by browse to sort by Recently Added in a way that
     /// surfaces freshly-added files inside deep subtrees.
     pub mtime: SystemTime,
+    /// Sidecar poster for this directory: a sibling `.jpg`/`.jpeg` in the
+    /// *parent* directory sharing this dir's name (e.g. `Another Show.jpg`
+    /// next to `Another Show/`). Videos inside that have no explicit poster
+    /// inherit the nearest ancestor directory's poster — see
+    /// `Tree::inherited_dir_poster`.
+    pub poster: Option<PathBuf>,
 }
 
 impl Default for Dir {
@@ -49,6 +55,7 @@ impl Default for Dir {
         Self {
             children: BTreeMap::new(),
             mtime: SystemTime::UNIX_EPOCH,
+            poster: None,
         }
     }
 }
@@ -118,6 +125,25 @@ impl Tree {
 
     pub fn root_dir(&self) -> &Dir {
         &self.root
+    }
+
+    /// Nearest sidecar poster for `dir_vpath`, searching that directory itself
+    /// and then each ancestor (deepest first). Returns the first directory
+    /// poster found, so a video with no explicit poster of its own can inherit
+    /// the closest enclosing directory's poster. Empty path (virtual root) has
+    /// no poster.
+    pub fn inherited_dir_poster(&self, dir_vpath: &str) -> Option<PathBuf> {
+        let mut parts: Vec<&str> = dir_vpath.split('/').filter(|s| !s.is_empty()).collect();
+        while !parts.is_empty() {
+            let prefix = parts.join("/");
+            if let Some(Node::Dir(d)) = self.lookup(&prefix) {
+                if let Some(poster) = &d.poster {
+                    return Some(poster.clone());
+                }
+            }
+            parts.pop();
+        }
+        None
     }
 }
 
@@ -193,6 +219,7 @@ fn clone_tree(t: &Tree) -> Tree {
 fn clone_dir(d: &Dir) -> Dir {
     let mut out = Dir {
         mtime: d.mtime,
+        poster: d.poster.clone(),
         ..Dir::default()
     };
     for (k, v) in &d.children {

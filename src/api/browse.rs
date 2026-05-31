@@ -87,6 +87,10 @@ pub async fn browse(
         }
     };
 
+    // Poster inherited from this directory or its ancestors — a video child
+    // with no explicit poster falls back to the nearest enclosing dir poster.
+    let inherited_poster = tree.inherited_dir_poster(&vpath_norm).is_some();
+
     let mut entries = Vec::with_capacity(dir.children.len());
 
     // At the virtual root, emit library roots in CLI order (the order the user
@@ -116,7 +120,7 @@ pub async fn browse(
                     ext: f.ext.clone(),
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
-                    poster: f.poster.is_some(),
+                    poster: f.poster.is_some() || inherited_poster,
                 });
             }
         }

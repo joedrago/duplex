@@ -36,10 +36,17 @@ pub async fn poster(
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
     };
     let tree = state.library.snapshot();
-    let Some(Node::File(f)) = tree.lookup(&vp) else {
-        return StatusCode::NOT_FOUND.into_response();
+    // A file serves its own poster, else the nearest ancestor directory's
+    // poster (tiered fallback). A directory serves its own/inherited poster.
+    let abs = match tree.lookup(&vp) {
+        Some(Node::File(f)) => f.poster.clone().or_else(|| {
+            let parent = vp.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            tree.inherited_dir_poster(parent)
+        }),
+        Some(Node::Dir(_)) => tree.inherited_dir_poster(&vp),
+        None => None,
     };
-    let Some(abs) = f.poster.clone() else {
+    let Some(abs) = abs else {
         return StatusCode::NOT_FOUND.into_response();
     };
     drop(tree);

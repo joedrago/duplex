@@ -200,19 +200,27 @@ fn attach_sidecars(dir: &mut Dir) {
     }
 
     // Attach sidecars and a poster to matching video files (by file-name-
-    // without-ext).
+    // without-ext), and a poster to matching sub-directories (by dir name) so
+    // `Another Show.jpg` next to `Another Show/` becomes that dir's poster.
     for (name, node) in dir.children.iter_mut() {
-        if let Node::File(f) = node {
-            let Some(ext) = &f.ext else { continue };
-            if !VIDEO_EXTS.contains(&ext.as_str()) {
-                continue;
+        match node {
+            Node::File(f) => {
+                let Some(ext) = &f.ext else { continue };
+                if !VIDEO_EXTS.contains(&ext.as_str()) {
+                    continue;
+                }
+                let stem = strip_ext(name);
+                if let Some(subs) = sidecars.get(stem) {
+                    f.sidecars = subs.clone();
+                }
+                if let Some(poster) = posters.get(stem) {
+                    f.poster = Some(poster.clone());
+                }
             }
-            let stem = strip_ext(name);
-            if let Some(subs) = sidecars.get(stem) {
-                f.sidecars = subs.clone();
-            }
-            if let Some(poster) = posters.get(stem) {
-                f.poster = Some(poster.clone());
+            Node::Dir(d) => {
+                if let Some(poster) = posters.get(name.as_str()) {
+                    d.poster = Some(poster.clone());
+                }
             }
         }
     }
