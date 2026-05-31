@@ -15,15 +15,26 @@ final class HomeViewModel: ObservableObject {
     private let client = DuplexClient()
 
     func load() async {
-        async let libsTask: Void = loadLibraries()
-        async let recentTask: Void = loadRecent()
+        async let libsTask: Void = loadLibraries(force: false)
+        async let recentTask: Void = loadRecent(force: false)
         _ = await (libsTask, recentTask)
     }
 
-    private func loadLibraries() async {
+    /// Explicit refresh: re-fetch unconditionally and swap in the new data when
+    /// it lands, without blanking to `.loading` first (so the list doesn't flash
+    /// and focus stays put).
+    func reload() async {
+        async let libsTask: Void = loadLibraries(force: true)
+        async let recentTask: Void = loadRecent(force: true)
+        _ = await (libsTask, recentTask)
+    }
+
+    private func loadLibraries(force: Bool) async {
         // Skip on pop-back to Home — see BrowseViewModel.load for rationale.
-        if case .loaded = libraries { return }
-        libraries = .loading
+        if !force, case .loaded = libraries { return }
+        // Only show the loading state on the first load; a refresh keeps the
+        // current list visible until the new data arrives.
+        if !force { libraries = .loading }
         do {
             let resp = try await client.browse(path: "")
             libraries = .loaded(resp.entries)
@@ -32,9 +43,9 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    private func loadRecent() async {
-        if case .loaded = recent { return }
-        recent = .loading
+    private func loadRecent(force: Bool) async {
+        if !force, case .loaded = recent { return }
+        if !force { recent = .loading }
         do {
             let resp = try await client.recent(limit: 30)
             recent = .loaded(resp.items)
@@ -52,6 +63,7 @@ enum HomeFocus: Hashable {
     case binge(String)
     case continueWatching(String)
     case houseParty
+    case refresh
     case settings
 }
 
@@ -63,6 +75,7 @@ struct HomeView: View {
     @ObservedObject private var viewPref = ViewPreference.shared
     @ObservedObject private var houseParty = HousePartyStore.shared
     @ObservedObject private var ext = ExtensionPreference.shared
+    @ObservedObject private var refresh = LibraryRefresh.shared
 
     @State private var focus: HomeFocus?
     @State private var didSetInitialFocus = false
@@ -148,7 +161,7 @@ struct HomeView: View {
     private static let homePosterCols = 3
 
     private var focusColumns: [[HomeFocus]] {
-        let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.houseParty, .settings]
+        let libKeys: [HomeFocus] = [.search] + libraryEntries.map { .library($0.name) } + [.houseParty, .refresh, .settings]
         let recKeys: [HomeFocus] = recentItems.map { .recent($0.id) }
         let bcKeys: [HomeFocus] = bingeItems.map { .binge($0.id) } + continueItems.map { .continueWatching($0.vpath) }
         if viewPref.layout == .posters {
@@ -194,6 +207,11 @@ struct HomeView: View {
             nav.play(vpath: vpath)
         case .houseParty:
             if houseParty.joined { houseParty.leave() } else { houseParty.join() }
+        case .refresh:
+            // Re-pull libraries + recent from the server, and bump the poster
+            // nonce so changed art re-loads.
+            refresh.bump()
+            Task { await vm.reload() }
         case .settings:
             nav.push(.settings)
         case .search:
@@ -345,6 +363,8 @@ struct HomeView: View {
                     .padding(.vertical, 6)
                 housePartyRow
                     .id(HomeFocus.houseParty)
+                refreshRow
+                    .id(HomeFocus.refresh)
                 settingsRow
                     .id(HomeFocus.settings)
             }
@@ -403,6 +423,16 @@ struct HomeView: View {
         }
     }
 
+    private var refreshRow: some View {
+        GridEntryRow(
+            icon: "🔄",
+            title: "Refresh",
+            subtitle: nil,
+            meta: nil,
+            isFocused: focus == .refresh
+        )
+    }
+
     private var settingsRow: some View {
         GridEntryRow(
             icon: "⚙",
@@ -449,14 +479,14 @@ struct HomeView: View {
         switch item {
         case .dir(let name, let vpath, _, _, let hasPoster):
             PosterCell(
-                url: hasPoster ? client.posterURL(path: vpath) : nil,
+                url: hasPoster ? client.posterURL(path: vpath, cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "📁",
                 title: name,
                 isFocused: isFocused
             )
         case .file(let name, let vpath, _, _, let hasPoster):
             PosterCell(
-                url: hasPoster ? client.posterURL(path: vpath) : nil,
+                url: hasPoster ? client.posterURL(path: vpath, cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "🎬",
                 title: DuplexFormat.displayFileName(name),
                 isFocused: isFocused
@@ -532,7 +562,7 @@ struct HomeView: View {
                     let isFocused = focus == .binge(binge.id)
                     let front = binge.front ?? ""
                     PosterCell(
-                        url: front.isEmpty ? nil : client.posterURL(path: front),
+                        url: front.isEmpty ? nil : client.posterURL(path: front, cacheBust: refresh.posterNonce),
                         fallbackGlyph: "🍿",
                         title: binge.origin,
                         subtitle: "\(binge.remaining) left",
@@ -544,7 +574,7 @@ struct HomeView: View {
                     let isFocused = focus == .continueWatching(item.vpath)
                     let progress = item.entry.dur > 0 ? item.entry.pos / item.entry.dur : 0
                     PosterCell(
-                        url: client.posterURL(path: item.vpath),
+                        url: client.posterURL(path: item.vpath, cacheBust: refresh.posterNonce),
                         fallbackGlyph: "🎬",
                         title: DuplexFormat.displayFileLeaf(of: item.vpath),
                         progress: progress,
@@ -681,7 +711,7 @@ struct HomeView: View {
         switch col {
         case .libraries:
             switch f {
-            case .search, .library, .houseParty, .settings: return true
+            case .search, .library, .houseParty, .refresh, .settings: return true
             default: return false
             }
         case .recent:

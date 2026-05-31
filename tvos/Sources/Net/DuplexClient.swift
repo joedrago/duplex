@@ -98,10 +98,15 @@ struct DuplexClient {
         url("/api/sidecar", query: ["path": path, "index": String(index)])
     }
 
-    /// `/api/poster?path=<video vpath>` — the sidecar poster image for a video.
-    /// 404s when the video has no poster; callers fall back to a placeholder.
-    func posterURL(path: String) -> URL {
-        url("/api/poster", query: ["path": path])
+    /// `/api/poster?path=<vpath>` — the poster image for a video or directory
+    /// (own or inherited). 404s when none exists; callers fall back to a
+    /// placeholder. `cacheBust` (when non-zero) is appended as `&r=N` purely to
+    /// change the URL on an explicit refresh, forcing `AsyncImage` to re-load
+    /// art that changed in place; the server ignores it.
+    func posterURL(path: String, cacheBust: Int = 0) -> URL {
+        var query = ["path": path]
+        if cacheBust != 0 { query["r"] = String(cacheBust) }
+        return url("/api/poster", query: query)
     }
 
     // MARK: internals
@@ -110,7 +115,13 @@ struct DuplexClient {
         var comps = URLComponents(url: baseURL.appendingPathComponent(pathComponent),
                                   resolvingAgainstBaseURL: false)!
         if !query.isEmpty {
-            comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // Sort by key for a deterministic query string. A `[String: String]`
+            // has no stable iteration order, so otherwise the same logical URL
+            // can serialize its params in different orders across renders — which
+            // makes `AsyncImage` treat it as a new URL and reload (poster flicker).
+            comps.queryItems = query
+                .sorted { $0.key < $1.key }
+                .map { URLQueryItem(name: $0.key, value: $0.value) }
         }
         return comps.url!
     }

@@ -42,6 +42,7 @@ struct BrowseView: View {
     @StateObject private var vm = BrowseViewModel()
     @ObservedObject private var viewPref = ViewPreference.shared
     @ObservedObject private var ext = ExtensionPreference.shared
+    @ObservedObject private var refresh = LibraryRefresh.shared
     @EnvironmentObject private var nav: NavCoordinator
     @State private var focusedKey: BrowseFocus?
     @State private var didApplyInitialFocus = false
@@ -252,14 +253,14 @@ struct BrowseView: View {
         switch entry {
         case .dir(let name, _, _, let hasPoster):
             PosterCell(
-                url: hasPoster ? client.posterURL(path: subpath(name)) : nil,
+                url: hasPoster ? client.posterURL(path: subpath(name), cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "📁",
                 title: name,
                 isFocused: isFocused
             )
         case .file(let name, _, _, _, let hasPoster):
             PosterCell(
-                url: hasPoster ? client.posterURL(path: subpath(name)) : nil,
+                url: hasPoster ? client.posterURL(path: subpath(name), cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "🎬",
                 title: DuplexFormat.displayFileName(name),
                 isFocused: isFocused
