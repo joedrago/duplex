@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// A media title with any trailing parenthetical — "(2006)", "(2006, Theatrical)"
+/// — rendered in muted gray so the eye lands on the title proper. Titles without
+/// a trailing group render unchanged. The caller still sets the font and a base
+/// `foregroundStyle`; the dimmed segment's own color overrides it.
+func titleText(_ name: String) -> Text {
+    guard let (lead, paren) = DuplexFormat.splitTrailingParen(name) else {
+        return Text(name)
+    }
+    return Text(lead) + Text(" ") + Text(paren).foregroundColor(DuplexColor.muted)
+}
+
 struct EntryRow: View {
     let icon: String
     let title: String
@@ -34,7 +45,7 @@ struct EntryRowLabel: View {
                         .foregroundStyle(DuplexColor.muted)
                         .lineLimit(1)
                 }
-                Text(title)
+                titleText(title)
                     .font(.system(size: 22, weight: .medium))
                     .foregroundStyle(DuplexColor.fg)
                     .lineLimit(1)

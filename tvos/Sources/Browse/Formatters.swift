@@ -57,6 +57,19 @@ enum DuplexFormat {
         displayFileName(leaf(of: vpath))
     }
 
+    /// Splits a trailing parenthetical group — "(2006)", "(2006, Theatrical)" —
+    /// off the end of a display name. Returns the leading text (trailing spaces
+    /// trimmed) and the parenthetical including its parens, or nil when the name
+    /// has no such trailing group.
+    static func splitTrailingParen(_ name: String) -> (lead: String, paren: String)? {
+        guard name.hasSuffix(")"), let open = name.lastIndex(of: "(") else { return nil }
+        var lead = String(name[..<open])
+        let paren = String(name[open...])
+        while lead.last == " " { lead.removeLast() }
+        guard !lead.isEmpty else { return nil }
+        return (lead, paren)
+    }
+
     /// Everything before the last slash, for showing context. Empty if none.
     static func parent(of vpath: String) -> String {
         if let i = vpath.lastIndex(of: "/") {

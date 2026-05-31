@@ -389,6 +389,10 @@ main:has(.settings-page) {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+/* Trailing "(2006)"-style parenthetical, dimmed so the title proper reads first. */
+.name-paren {
+    color: var(--muted);
+}
 .row-meta {
     color: var(--muted);
     font-size: 0.78rem;

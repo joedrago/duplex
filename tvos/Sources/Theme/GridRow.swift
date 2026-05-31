@@ -100,7 +100,7 @@ struct GridContinueRow: View {
                                 .foregroundStyle(DuplexColor.muted)
                                 .lineLimit(1)
                         }
-                        Text(title)
+                        titleText(title)
                             .font(.system(size: 22, weight: .medium))
                             .foregroundStyle(DuplexColor.fg)
                             .lineLimit(1)

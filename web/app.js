@@ -653,10 +653,11 @@ function renderRoot(data) {
 // rail on the right when the list is long enough to be worth navigating.
 function renderSubdir(path, data) {
     const sorted = sortEntries(data.entries, getSort())
-    // Folders-first when sorting by name (conventional file-manager order).
-    // With Recent sort, dirs + files interleave by mtime so freshly-added
-    // content surfaces regardless of kind.
-    const ordered = getSort() === "recent" ? sorted : [...sorted].sort(folderFirst)
+    // Interleave dirs + files alphabetically when sorting by name, so the
+    // alphabet rail lands on whatever entry actually starts with a letter
+    // instead of skating past a wall of folders. With Recent sort they already
+    // interleave by mtime so freshly-added content surfaces regardless of kind.
+    const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => a.name.localeCompare(b.name))
 
     const list = el("ul", { className: "col-list" })
     if (ordered.length === 0) list.append(el("li", { className: "col-empty" }, "(empty directory)"))
@@ -673,11 +674,6 @@ function renderSubdir(path, data) {
 
     const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
     app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
-}
-
-function folderFirst(a, b) {
-    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1
-    return a.name.localeCompare(b.name)
 }
 
 function basenameOf(path) {
@@ -697,11 +693,20 @@ function displayName(name) {
     return name.replace(/\.(mp4|mkv)$/i, "")
 }
 
+// Split a trailing parenthetical — "(2006)", "(2006, Theatrical)" — into a dim
+// span so the eye lands on the title proper. Returns an array of children
+// (text + optional span) to spread into a .row-name element.
+function nameParts(name) {
+    const m = /^(.+?)(\s*)(\([^()]*\))$/.exec(name)
+    if (!m) return [name]
+    return [m[1], m[2], el("span", { className: "name-paren" }, m[3])]
+}
+
 function makeBrowseRow(entry, vpath) {
     const isDir = entry.kind === "dir"
     const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
-    const name = el("div", { className: "row-name" }, isDir ? entry.name : displayName(entry.name))
+    const name = el("div", { className: "row-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
         : [prettySize(entry.size), entry.ext].filter(Boolean)
@@ -778,7 +783,7 @@ function makeContinueRow(it, rebuild) {
         el(
             "div",
             { className: "row-text" },
-            el("div", { className: "row-name" }, displayName(basename)),
+            el("div", { className: "row-name" }, ...nameParts(displayName(basename))),
             el("div", { className: "row-meta" }, `${fmtTime(remaining)} left`)
         ),
         el("div", { className: "row-progress" }, el("div", { className: "row-progress-fill", style: `width:${pct.toFixed(1)}%` }))
@@ -837,7 +842,7 @@ async function fetchAndPopulateRecent(col) {
                 "div",
                 { className: "row-text" },
                 parent ? el("div", { className: "row-context" }, parent) : null,
-                el("div", { className: "row-name" }, isDir ? basename : displayName(basename)),
+                el("div", { className: "row-name" }, ...nameParts(isDir ? basename : displayName(basename))),
                 el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(it.mtime)}`)
             )
         )
