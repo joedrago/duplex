@@ -63,44 +63,27 @@ fn handle_event(lib: &Library, ev: &notify_debouncer_full::DebouncedEvent) {
         return;
     }
 
+    // A directory's contents — its files, its sub-directories, and the sibling
+    // `.jpg` posters that bind to them — are all determined by that one
+    // directory's on-disk listing. So for every changed path we re-sync the
+    // directory that *contains* it. This is idempotent: a spurious / access /
+    // no-op event re-reads the same listing and converges to the same correct
+    // state, instead of tearing the subtree down and losing directory posters
+    // (which live only in the in-memory tree, having been folded out of the
+    // browsable listing during the scan).
     let roots = Arc::clone(&lib.roots);
     lib.mutate(move |tree| {
+        let mut done: Vec<PathBuf> = Vec::new();
         for abs in &paths {
-            // Remove any existing entry, then re-add from disk (if it still exists).
-            scan::remove_path(tree, &roots, abs);
-            if std::fs::symlink_metadata(abs).is_ok() {
-                // Refresh by walking just the affected file's parent directory
-                // for cheap. For directories, fall back to a full subtree
-                // re-add via the path itself.
-                if abs.is_dir() {
-                    re_add_subtree(tree, &roots, abs);
-                } else {
-                    scan::upsert_path(tree, &roots, abs);
-                }
+            let Some(parent) = abs.parent() else { continue };
+            if done.iter().any(|p| p == parent) {
+                continue;
             }
+            done.push(parent.to_path_buf());
+            scan::resync_dir(tree, &roots, parent);
         }
         // Keep the deep-mtime invariant in sync so freshly added files bubble
         // up the ancestor chain for "Recently Added" sort/section.
         crate::library::recompute_dir_mtimes(tree);
     });
-}
-
-fn re_add_subtree(
-    tree: &mut crate::library::Tree,
-    roots: &[crate::library::Root],
-    abs: &std::path::Path,
-) {
-    // Walk the subtree manually and upsert each file.
-    let Ok(read) = std::fs::read_dir(abs) else {
-        return;
-    };
-    for entry in read.flatten() {
-        let p = entry.path();
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            re_add_subtree(tree, roots, &p);
-        } else if meta.is_file() {
-            scan::upsert_path(tree, roots, &p);
-        }
-    }
 }

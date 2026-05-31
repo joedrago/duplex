@@ -22,102 +22,139 @@ pub fn scan(lib: &Library) -> Tree {
     tree
 }
 
-/// Apply a single discovered path into the tree (used by the watcher).
-pub fn upsert_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
-    let Some((root, rel)) = resolve_relative(roots, abs) else {
+/// Re-sync a single directory's listing from disk into the tree.
+///
+/// This is the watcher's one and only mutation primitive. Given the absolute
+/// path of a directory whose contents may have changed, it re-reads that
+/// directory's immediate entries from disk and rebuilds the corresponding tree
+/// node, then re-binds sidecars/posters at this level via `attach_sidecars`.
+///
+/// Crucially it is **idempotent and non-destructive**: existing child *Dir*
+/// subtrees are reused untouched (their own contents stay in sync via their
+/// own events), and posters are re-derived from the sibling `.jpg`s actually
+/// present on disk. Firing it on a no-op event (e.g. an access/stat event that
+/// carries no real change) reproduces the exact same correct state rather than
+/// tearing a subtree down and losing the directory posters that only live in
+/// the in-memory tree. If `dir_abs` no longer exists on disk, the node is
+/// removed. Ancestors are created as needed.
+pub fn resync_dir(tree: &mut Tree, roots: &[Root], dir_abs: &Path) {
+    let Some((root, rel)) = resolve_relative(roots, dir_abs) else {
         return;
     };
-    let mut parts: Vec<&std::ffi::OsStr> = rel.iter().collect();
-    if parts.is_empty() {
-        return;
-    }
-    // Last part is the leaf name.
-    let leaf_os = parts.pop().expect("non-empty");
-    let leaf = leaf_os.to_string_lossy().into_owned();
-    if is_hidden(&leaf) {
-        return;
-    }
-
-    let meta = match std::fs::symlink_metadata(abs) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-
-    // Ensure the root branch exists.
-    let root_branch = tree
-        .root
-        .children
-        .entry(root.name.clone())
-        .or_insert_with(|| Node::Dir(Dir::default()));
-    let mut cur = match root_branch {
-        Node::Dir(d) => d,
-        _ => return,
-    };
-    for part in parts {
-        let part_str = part.to_string_lossy().into_owned();
-        if is_hidden(&part_str) {
-            return;
-        }
-        let entry = cur
-            .children
-            .entry(part_str)
-            .or_insert_with(|| Node::Dir(Dir::default()));
-        cur = match entry {
-            Node::Dir(d) => d,
-            _ => return,
-        };
-    }
-
-    if meta.is_dir() {
-        cur.children
-            .entry(leaf)
-            .or_insert_with(|| Node::Dir(Dir::default()));
-    } else if meta.is_file() {
-        let ext = extension_of(&leaf);
-        let kind = classify(&ext);
-        if kind.is_none() {
-            return;
-        }
-        let file = File {
-            abs_path: abs.to_path_buf(),
-            ext,
-            size: meta.len(),
-            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            sidecars: Vec::new(),
-            poster: None,
-        };
-        cur.children.insert(leaf, Node::File(file));
-        // Re-bind sidecars for the parent directory after a change.
-        attach_sidecars(cur);
-    }
-}
-
-/// Remove a path from the tree if present.
-pub fn remove_path(tree: &mut Tree, roots: &[Root], abs: &Path) {
-    let Some((root, rel)) = resolve_relative(roots, abs) else {
-        return;
-    };
-    let mut parts: Vec<String> = rel
+    let parts: Vec<String> = rel
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    if parts.is_empty() {
+    if parts.iter().any(|p| is_hidden(p)) {
         return;
     }
-    let leaf = parts.pop().unwrap();
-    let Some(Node::Dir(root_branch)) = tree.root.children.get_mut(&root.name) else {
+
+    // Gone from disk → drop the node from the tree.
+    if !dir_abs.is_dir() {
+        remove_node(tree, &root.name, &parts);
+        return;
+    }
+
+    let read = match std::fs::read_dir(dir_abs) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("read_dir {} failed: {}", dir_abs.display(), e);
+            return;
+        }
+    };
+
+    let Some(dir) = dir_node_mut(tree, &root.name, &parts) else {
+        return;
+    };
+
+    // Take the old children so we can reuse existing sub-directory subtrees;
+    // everything not seen on disk this pass is dropped (handles deletions).
+    let mut old: BTreeMap<String, Node> = std::mem::take(&mut dir.children);
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_hidden(&name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            // Reuse the existing subtree if we have one; otherwise scan the
+            // new sub-directory fresh (and skip it if it holds nothing).
+            match old.remove(&name) {
+                Some(existing @ Node::Dir(_)) => {
+                    dir.children.insert(name, existing);
+                }
+                _ => {
+                    let mut child = Dir::default();
+                    scan_dir(&entry.path(), &mut child);
+                    attach_sidecars(&mut child);
+                    if !child.children.is_empty() {
+                        dir.children.insert(name, Node::Dir(child));
+                    }
+                }
+            }
+        } else if meta.is_file() {
+            let ext = extension_of(&name);
+            if classify(&ext).is_none() {
+                continue;
+            }
+            let file = File {
+                abs_path: entry.path(),
+                ext,
+                size: meta.len(),
+                mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                sidecars: Vec::new(),
+                poster: None,
+            };
+            dir.children.insert(name, Node::File(file));
+        }
+    }
+    attach_sidecars(dir);
+}
+
+/// Navigate to the `Dir` node at `root_name`/`parts`, creating intermediate
+/// (and the final) directories as needed. Returns `None` if the path would
+/// have to cross a `File` node.
+fn dir_node_mut<'a>(tree: &'a mut Tree, root_name: &str, parts: &[String]) -> Option<&'a mut Dir> {
+    let root_branch = tree
+        .root
+        .children
+        .entry(root_name.to_string())
+        .or_insert_with(|| Node::Dir(Dir::default()));
+    let mut cur = match root_branch {
+        Node::Dir(d) => d,
+        _ => return None,
+    };
+    for part in parts {
+        let entry = cur
+            .children
+            .entry(part.clone())
+            .or_insert_with(|| Node::Dir(Dir::default()));
+        cur = match entry {
+            Node::Dir(d) => d,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+/// Remove the node at `root_name`/`parts` from the tree if present.
+fn remove_node(tree: &mut Tree, root_name: &str, parts: &[String]) {
+    let Some((leaf, ancestors)) = parts.split_last() else {
+        // Empty path == the root itself vanished; drop the whole root branch.
+        tree.root.children.remove(root_name);
+        return;
+    };
+    let Some(Node::Dir(root_branch)) = tree.root.children.get_mut(root_name) else {
         return;
     };
     let mut cur = root_branch;
-    for part in &parts {
-        let next = cur.children.get_mut(part);
-        match next {
+    for part in ancestors {
+        match cur.children.get_mut(part) {
             Some(Node::Dir(d)) => cur = d,
             _ => return,
         }
     }
-    cur.children.remove(&leaf);
-    attach_sidecars(cur);
+    cur.children.remove(leaf);
 }
 
 fn resolve_relative<'a>(roots: &'a [Root], abs: &Path) -> Option<(&'a Root, PathBuf)> {
@@ -202,6 +239,13 @@ fn attach_sidecars(dir: &mut Dir) {
     // Attach sidecars and a poster to matching video files (by file-name-
     // without-ext), and a poster to matching sub-directories (by dir name) so
     // `Another Show.jpg` next to `Another Show/` becomes that dir's poster.
+    //
+    // This is authoritative and idempotent for *this* directory level: each
+    // immediate child's sidecars/poster are fully determined by the sibling
+    // files present here, so we always overwrite — setting on a match and
+    // CLEARING on no match. That lets the watcher re-run this over an existing
+    // (possibly stale) subtree and converge to the correct state instead of
+    // leaving a poster bound to a `.jpg` that is no longer here.
     for (name, node) in dir.children.iter_mut() {
         match node {
             Node::File(f) => {
@@ -210,17 +254,11 @@ fn attach_sidecars(dir: &mut Dir) {
                     continue;
                 }
                 let stem = strip_ext(name);
-                if let Some(subs) = sidecars.get(stem) {
-                    f.sidecars = subs.clone();
-                }
-                if let Some(poster) = posters.get(stem) {
-                    f.poster = Some(poster.clone());
-                }
+                f.sidecars = sidecars.get(stem).cloned().unwrap_or_default();
+                f.poster = posters.get(stem).cloned();
             }
             Node::Dir(d) => {
-                if let Some(poster) = posters.get(name.as_str()) {
-                    d.poster = Some(poster.clone());
-                }
+                d.poster = posters.get(name.as_str()).cloned();
             }
         }
     }
@@ -289,5 +327,203 @@ fn extract_lang(name: &str) -> Option<String> {
         Some(suffix.to_lowercase())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::Root;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+
+    fn scratch() -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("duplex-postertest-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        // Canonicalize so paths match Library::new's canonicalized roots
+        // (macOS /var -> /private/var symlink would otherwise break
+        // strip_prefix in the watcher path-resolution).
+        std::fs::canonicalize(&p).unwrap()
+    }
+
+    fn touch(p: &Path) {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    /// Build the prod-style layout: a `Foo.jpg` sibling next to `Foo/`,
+    /// with two season subdirs each holding an episode.
+    fn build_foo(root: &Path) {
+        touch(&root.join("TV/Foo.jpg"));
+        touch(&root.join("TV/Foo/S01/S01E01.mp4"));
+        touch(&root.join("TV/Foo/S02/S02E01.mp4"));
+    }
+
+    fn lib_for(root: &Path) -> (Library, Vec<Root>) {
+        let lib = Library::new(&[root.to_path_buf()]).unwrap();
+        let roots = (*lib.roots).clone();
+        (lib, roots)
+    }
+
+    // ---- the dir node lookup helper (lookup() returns None for root only) ----
+    fn dir_poster(tree: &Tree, vpath: &str) -> Option<PathBuf> {
+        match tree.lookup(vpath) {
+            Some(Node::Dir(d)) => d.poster.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn fresh_scan_attaches_dir_poster() {
+        let root = scratch();
+        build_foo(&root);
+        let (lib, _roots) = lib_for(&root);
+        let tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+
+        // Foo/ should carry the sidecar poster.
+        let foo = format!("{name}/TV/Foo");
+        assert!(
+            dir_poster(&tree, &foo).is_some(),
+            "fresh scan: Foo/ should have a poster"
+        );
+        // Seasons inherit it.
+        assert!(
+            tree.inherited_dir_poster(&format!("{name}/TV/Foo/S01"))
+                .is_some(),
+            "fresh scan: S01 should inherit Foo's poster"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Replay what the watcher's `handle_event` does for a batch of changed
+    /// paths: re-sync the directory containing each one (deduped), then refresh
+    /// deep mtimes.
+    fn fire(tree: &mut Tree, roots: &[Root], changed: &[PathBuf]) {
+        let mut done: Vec<PathBuf> = Vec::new();
+        for abs in changed {
+            let Some(parent) = abs.parent() else { continue };
+            if done.iter().any(|p| p == parent) {
+                continue;
+            }
+            done.push(parent.to_path_buf());
+            resync_dir(tree, roots, parent);
+        }
+        crate::library::recompute_dir_mtimes(tree);
+    }
+
+    #[test]
+    fn no_op_dir_event_preserves_poster() {
+        // The reported bug: disk is static, but browsing triggers access/stat
+        // events. A no-change event on the Foo directory must NOT lose its
+        // poster.
+        let root = scratch();
+        build_foo(&root);
+        let (lib, roots) = lib_for(&root);
+        let mut tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+        let foo_vp = format!("{name}/TV/Foo");
+        assert!(dir_poster(&tree, &foo_vp).is_some(), "precondition");
+
+        // Event paths the watcher might receive while browsing, with no disk
+        // change at all: the directory itself and its episodes.
+        fire(
+            &mut tree,
+            &roots,
+            &[
+                root.join("TV/Foo"),
+                root.join("TV/Foo/S01/S01E01.mp4"),
+                root.join("TV/Foo/S02/S02E01.mp4"),
+            ],
+        );
+
+        assert!(
+            dir_poster(&tree, &foo_vp).is_some(),
+            "BUG: a no-op watcher event wiped Foo's poster"
+        );
+        assert!(
+            tree.inherited_dir_poster(&format!("{name}/TV/Foo/S01"))
+                .is_some(),
+            "BUG: a no-op watcher event broke season inheritance"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn repeated_events_are_idempotent() {
+        // Browsing fires events repeatedly; the poster state must be stable.
+        let root = scratch();
+        build_foo(&root);
+        let (lib, roots) = lib_for(&root);
+        let mut tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+        let foo_vp = format!("{name}/TV/Foo");
+
+        for _ in 0..5 {
+            fire(
+                &mut tree,
+                &roots,
+                &[
+                    root.join("TV"),
+                    root.join("TV/Foo"),
+                    root.join("TV/Foo/S01/S01E01.mp4"),
+                ],
+            );
+            assert!(
+                dir_poster(&tree, &foo_vp).is_some(),
+                "BUG: poster lost after repeated events"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deleting_poster_clears_it() {
+        let root = scratch();
+        build_foo(&root);
+        let (lib, roots) = lib_for(&root);
+        let mut tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+        let foo_vp = format!("{name}/TV/Foo");
+        assert!(dir_poster(&tree, &foo_vp).is_some(), "precondition");
+
+        // User actually deletes Foo.jpg; the watcher re-syncs its parent (TV).
+        let jpg = root.join("TV/Foo.jpg");
+        std::fs::remove_file(&jpg).unwrap();
+        fire(&mut tree, &roots, &[jpg]);
+
+        assert!(
+            dir_poster(&tree, &foo_vp).is_none(),
+            "BUG: deleting Foo.jpg left a stale poster on Foo/"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn adding_poster_binds_it() {
+        // Start without a poster, then add Foo.jpg and fire the parent event.
+        let root = scratch();
+        touch(&root.join("TV/Foo/S01/S01E01.mp4"));
+        let (lib, roots) = lib_for(&root);
+        let mut tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+        let foo_vp = format!("{name}/TV/Foo");
+        assert!(dir_poster(&tree, &foo_vp).is_none(), "precondition");
+
+        let jpg = root.join("TV/Foo.jpg");
+        touch(&jpg);
+        fire(&mut tree, &roots, &[jpg]);
+
+        assert!(
+            dir_poster(&tree, &foo_vp).is_some(),
+            "BUG: adding Foo.jpg did not bind the poster"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
