@@ -208,8 +208,11 @@ struct HomeView: View {
         case .houseParty:
             if houseParty.joined { houseParty.leave() } else { houseParty.join() }
         case .refresh:
-            // Re-pull libraries + recent from the server, and bump the poster
-            // nonce so changed art re-loads.
+            // Re-pull libraries + recent from the server. Drop every cached
+            // poster image and bump the nonce so all art re-fetches from the
+            // server (the nonce also changes each poster URL, so any cell still
+            // showing stale/blank art reloads).
+            PosterImageCache.shared.clear()
             refresh.bump()
             Task { await vm.reload() }
         case .settings:

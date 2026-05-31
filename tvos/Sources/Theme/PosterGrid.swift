@@ -80,20 +80,7 @@ struct PosterArt: View {
         ZStack {
             Color.black
             if let url {
-                AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.18))) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit()
-                    case .failure:
-                        fallback
-                    case .empty:
-                        // Still loading — keep the black box; the fallback would
-                        // flash for posters that are about to appear.
-                        Color.clear
-                    @unknown default:
-                        fallback
-                    }
-                }
+                PosterImageView(url: url) { fallback }
             } else {
                 fallback
             }
