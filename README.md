@@ -82,9 +82,13 @@ src/
     vpath.rs           URL path normalisation/encoding
     codec_string.rs    avc1/hvc1/etc. codec strings for the manifest
 web/                   vanilla-JS client (rust-embed'd)
-  app.js               UI / browse / picker / controls
-  player.js            WebCodecs + Mediabunny player
+  app.js               UI / browse / poster grid / picker / controls
+  player.js            WebCodecs + Mediabunny player (+ playback speed)
+  mkv-subs.js          streaming Matroska subtitle-track reader (Range-based)
+  pgs.js               PGS (image subtitle) decoder + canvas overlay
+  embedded-subs.js     playhead-following PGS/ASS renderer (uses the above)
   vendor/mediabunny.mjs    (vendored, jsdelivr +esm bundle)
+  vendor/jassub/           (vendored JASSUB — libass-in-WASM, for ASS)
 ```
 
 ## systemd
@@ -119,9 +123,11 @@ WantedBy=multi-user.target
   proprietary Dolby decoders. The audio button shows 🔇 and the picker
   labels offending tracks `— unsupported`. Future: in-browser WASM decode.
 - **HEVC** on Firefox, **AV1** on older Intel Macs: clean inline error.
-- **Embedded text subtitle tracks** (mov*text/subrip/ASS \_inside* the
-  container) aren't yet readable — Mediabunny doesn't expose subtitle
-  tracks. Sidecar subtitles work; embedded ones are hidden from the picker.
-- **Image-based subtitles** (PGS, VobSub, DVDSub) inventoried but not rendered.
-- **ASS styling** is downconverted to plain text (JASSUB is a future opt-in).
-- No watch-progress sync across devices, no accounts, no posters. By design.
+- **Embedded subtitles in MKV** (PGS image subs + ASS/SRT text) now render in
+  the web client via a purpose-built Matroska subtitle reader
+  (`web/mkv-subs.js`) — Mediabunny still won't surface them. PGS is decoded to
+  bitmaps (`web/pgs.js`); ASS renders with full styling through JASSUB plus the
+  file's embedded fonts (`web/embedded-subs.js`). Subtitle tracks **inside MP4**
+  (mov_text) and **VobSub / DVDSub** are not yet handled. Sidecar subtitles
+  work as before.
+- No watch-progress sync across devices, no accounts. By design.

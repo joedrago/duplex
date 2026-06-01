@@ -51,12 +51,8 @@ the implementation plan that drove this rewrite lives at
 
 ## What's deferred ("future fun")
 
-- Embedded text subtitle reading (mov_text / subrip / ASS in MP4/MKV) —
-  Mediabunny doesn't currently expose subtitle tracks; would need a small
-  JS subtitle-track demuxer or the same in WASM.
-- ASS rendering with styling (fonts, positioning, karaoke) — JASSUB is the
-  drop-in dependency.
-- PGS / VobSub image subtitle rendering — libbitsub / pgs-wasm.
+- Embedded subtitles **in MP4** (mov_text) and **VobSub / DVDSub** anywhere.
+  (Embedded ASS/SRT/PGS *in MKV* now work in the web client — see below.)
 - AC-3 / E-AC-3 in-browser decode for non-Dolby Chrome builds — ffmpeg.wasm
   audio-only would work.
 - AV1 fallback for older Intel Macs that can't hardware-decode.

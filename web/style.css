@@ -520,6 +520,127 @@ main:has(.settings-page) {
     cursor: default;
 }
 
+/* Posters layout — a 2:3 art grid mirroring the tvOS PosterGrid. The body
+ * scrolls vertically; the grid auto-fills columns sized around the tvOS
+ * ~180px target, so the count adapts to the window like tvOS's derived
+ * columnCount(forWidth:). */
+.col-body-posters {
+    display: block;
+    overflow-y: auto;
+    padding: 1.25rem;
+}
+.poster-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 1.5rem 1.25rem;
+    align-content: start;
+}
+.poster-cell {
+    position: relative;
+    min-width: 0;
+}
+.poster-link {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    text-decoration: none;
+    color: var(--muted);
+    outline: none;
+}
+/* Focus/hover lift + accent ring, matching the tvOS PosterCell's
+ * scaleEffect(1.05) + accent strokeBorder on focus. */
+.poster-art {
+    position: relative;
+    aspect-ratio: 2 / 3;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    transition:
+        transform 0.12s ease,
+        border-color 0.12s ease,
+        box-shadow 0.12s ease;
+}
+.poster-link:hover .poster-art,
+.poster-link:focus-visible .poster-art {
+    transform: scale(1.04);
+    border-color: var(--accent);
+    border-width: 3px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.55);
+}
+.poster-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.poster-fallback {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--panel-2);
+}
+.poster-fallback-glyph {
+    font-size: 2.8rem;
+    opacity: 0.7;
+}
+/* Continue-Watching sliver, inset so the focus ring never overlaps it. */
+.poster-progress {
+    position: absolute;
+    left: 0.45rem;
+    right: 0.45rem;
+    bottom: 0.45rem;
+    height: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.poster-progress-fill {
+    height: 100%;
+    background: var(--accent);
+}
+.poster-caption {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+    line-height: 1.3;
+    text-align: left;
+}
+.poster-link:hover .poster-name,
+.poster-link:focus-visible .poster-name {
+    color: var(--fg);
+}
+.poster-glyph {
+    opacity: 0.85;
+    flex-shrink: 0;
+}
+.poster-name {
+    min-width: 0;
+    /* Reserve two lines so cells in a row align even when names differ in
+     * length (tvOS reserves the same with a fixed caption height). */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    color: var(--muted);
+}
+/* The hover 🍿 binge action on a folder poster, top-right of the art. */
+.poster-cell .row-binge {
+    position: absolute;
+    top: 0.35rem;
+    right: 0.35rem;
+    padding: 0.2rem 0.45rem;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.55);
+}
+.poster-cell:hover .row-binge {
+    opacity: 1;
+}
+
 .badge {
     display: inline-block;
     padding: 0.05rem 0.4rem;
@@ -556,8 +677,8 @@ main:has(.settings-page) {
     width: 100%;
 }
 /* When the player is mounted, hide the page header + debug details so the
- * picture goes full-bleed. Couch-first: chrome only belongs on the browse
- * views, not while watching. */
+ * picture goes full-bleed — chrome only belongs on the browse views, not
+ * while watching. */
 .player-active header,
 .player-active main > .player > details {
     display: none;
@@ -625,9 +746,22 @@ main:has(.settings-page) {
     max-height: 100%;
 }
 
-/* Couch-first player chrome: chunky controls, lots of padding, sized to be
- * legible across a 10-foot room. Mouse users get the same UI; clicking and
- * scrubbing still work as expected. */
+/* Embedded-subtitle overlays (PGS bitmaps, ASS via JASSUB). Each canvas is
+ * sized to the subtitle's native resolution and letterboxed by object-fit so
+ * it lands exactly over the picture, regardless of the stage's aspect. Above
+ * the video, below the chrome (controls/back are z-index 10); never eats
+ * clicks. The generic `.player-stage canvas` rule already supplies
+ * width/height:100% + object-fit:contain. */
+.player-stage canvas.sub-overlay {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    pointer-events: none;
+    z-index: 4;
+}
+
+/* Player chrome: chunky, well-padded controls that read clearly at a glance.
+ * Appears on hover/focus; clicking and scrubbing work as expected. */
 .player-controls {
     position: absolute;
     left: 0;
@@ -790,6 +924,27 @@ main:has(.settings-page) {
 .ctrl-audio:hover {
     background: rgba(255, 255, 255, 0.08);
     color: var(--accent);
+}
+
+/* Playback-speed picker — a native <select> styled to match the chrome. */
+.ctrl-speed {
+    background: rgba(0, 0, 0, 0.5);
+    color: var(--fg);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+    font-size: 1.05rem;
+    line-height: 1;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+}
+.ctrl-speed:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--accent);
+}
+.ctrl-speed option {
+    background: var(--panel);
+    color: var(--fg);
 }
 
 details {

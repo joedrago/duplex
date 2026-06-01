@@ -43,32 +43,36 @@ export async function probeTracks(rawUrl) {
     const tracks = await input.getTracks()
 
     const video_tracks = await Promise.all(
-        tracks.filter((t) => t.isVideoTrack()).map(async (t) => {
-            const cfg = await t.getDecoderConfig().catch(() => null)
-            return {
-                codec: await t.getCodec().catch(() => null),
-                width: await t.getDisplayWidth().catch(() => null),
-                height: await t.getDisplayHeight().catch(() => null),
-                color_transfer: cfg?.colorSpace?.transfer ?? null
-            }
-        })
+        tracks
+            .filter((t) => t.isVideoTrack())
+            .map(async (t) => {
+                const cfg = await t.getDecoderConfig().catch(() => null)
+                return {
+                    codec: await t.getCodec().catch(() => null),
+                    width: await t.getDisplayWidth().catch(() => null),
+                    height: await t.getDisplayHeight().catch(() => null),
+                    color_transfer: cfg?.colorSpace?.transfer ?? null
+                }
+            })
     )
 
     const audio_tracks = await Promise.all(
-        tracks.filter((t) => t.isAudioTrack()).map(async (t) => {
-            const cfg = await t.getDecoderConfig().catch(() => null)
-            const codec = await t.getCodec().catch(() => null)
-            return {
-                codec,
-                codec_string: cfg?.codec ?? codec,
-                sample_rate: cfg?.sampleRate ?? t.sampleRate ?? null,
-                channels: cfg?.numberOfChannels ?? t.numberOfChannels ?? null,
-                // mediabunny reports a channel count, not ffprobe's "5.1"
-                // layout string; the picker falls back to "{N}ch".
-                channel_layout: null,
-                language: await t.getLanguageCode().catch(() => null)
-            }
-        })
+        tracks
+            .filter((t) => t.isAudioTrack())
+            .map(async (t) => {
+                const cfg = await t.getDecoderConfig().catch(() => null)
+                const codec = await t.getCodec().catch(() => null)
+                return {
+                    codec,
+                    codec_string: cfg?.codec ?? codec,
+                    sample_rate: cfg?.sampleRate ?? t.sampleRate ?? null,
+                    channels: cfg?.numberOfChannels ?? t.numberOfChannels ?? null,
+                    // mediabunny reports a channel count, not ffprobe's "5.1"
+                    // layout string; the picker falls back to "{N}ch".
+                    channel_layout: null,
+                    language: await t.getLanguageCode().catch(() => null)
+                }
+            })
     )
 
     return { video_tracks, audio_tracks }
@@ -114,6 +118,10 @@ class PlayerController extends EventTarget {
         this._volume = 1
         this._paused = true
         this._ended = false
+        // Playback speed multiplier. The master clock advances `_rate`× wall
+        // time and each scheduled audio buffer plays at `_rate` (pitch shifts —
+        // no time-stretch). Changed via the `playbackRate` setter.
+        this._rate = 1
 
         this.disposed = false
 
@@ -598,20 +606,24 @@ class PlayerController extends EventTarget {
         sample.close()
         const src = this.audioCtx.createBufferSource()
         src.buffer = buf
+        // At non-1× speed the source plays faster/slower (and higher/lower
+        // pitched); the buffer therefore consumes `buf.duration / rate` of
+        // wall-clock (ctx) time, which is what the scheduler must advance by.
+        src.playbackRate.value = this._rate
         src.connect(this.audioGain)
         const when = Math.max(this.audioCtx.currentTime, this._mediaToCtxTime(tSec))
         src.start(when)
-        this.audioNextCtxTime = when + buf.duration
+        this.audioNextCtxTime = when + buf.duration / this._rate
         this.liveAudioSources.add(src)
         src.onended = () => this.liveAudioSources.delete(src)
     }
 
     _mediaToCtxTime(mediaSec) {
-        return this.audioBaseCtxTime + (mediaSec - this.audioBaseMediaTime)
+        return this.audioBaseCtxTime + (mediaSec - this.audioBaseMediaTime) / this._rate
     }
 
     _ctxToMediaTime(ctxSec) {
-        return this.audioBaseMediaTime + (ctxSec - this.audioBaseCtxTime)
+        return this.audioBaseMediaTime + (ctxSec - this.audioBaseCtxTime) * this._rate
     }
 
     // ---- presentation loop -------------------------------------------------
@@ -716,6 +728,24 @@ class PlayerController extends EventTarget {
     set currentTime(t) {
         // Fire-and-forget — matches HTMLMediaElement semantics.
         this.seek(t)
+    }
+
+    get playbackRate() {
+        return this._rate
+    }
+    set playbackRate(r) {
+        const clamped = Math.max(0.25, Math.min(4, Number(r) || 1))
+        if (clamped === this._rate || this.disposed) return
+        // Rebase the clock at the current media time under the OLD rate, switch
+        // rates, then respawn the pumps so audio re-schedules at the new rate
+        // (same machinery as a seek-in-place — a brief, harmless hitch).
+        const t = this.currentTime
+        this._rate = clamped
+        this.audioBaseMediaTime = t
+        this.audioBaseCtxTime = this.audioCtx.currentTime
+        this.audioNextCtxTime = this.audioBaseCtxTime
+        this.dispatchEvent(new Event("ratechange"))
+        this._restartAtTime(t)
     }
 
     get duration() {

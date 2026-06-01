@@ -43,6 +43,26 @@ function setSort(v) {
     }
 }
 
+// Layout mode for the browse view: "list" (the classic vertical rows) or
+// "posters" (a 2:3 art grid). Persisted alongside the sort like tvOS's
+// ViewPreference, except the web client exposes layout and sort as two
+// independent header toggles rather than one cycling control.
+const LAYOUT_KEY = "duplex.layout"
+function getLayout() {
+    try {
+        return localStorage.getItem(LAYOUT_KEY) || "list"
+    } catch {
+        return "list"
+    }
+}
+function setLayout(v) {
+    try {
+        localStorage.setItem(LAYOUT_KEY, v)
+    } catch (e) {
+        console.warn("[layout] write failed", e)
+    }
+}
+
 // Resume-position store. Map of vpath -> {pos, dur, at}. Lives in
 // localStorage so it survives across sessions but never touches the server's
 // disk (the server is read-only by design). Pruned at write time: entries in
@@ -285,7 +305,9 @@ const houseParty = {
     broadcast({ path, duration, position, playing }) {
         if (!this.joined) return
         this.markLocalAction()
-        console.log(`[houseparty] broadcast vpath=${path} pos=${(position || 0).toFixed(1)} dur=${(duration || 0).toFixed(1)} playing=${playing}`)
+        console.log(
+            `[houseparty] broadcast vpath=${path} pos=${(position || 0).toFixed(1)} dur=${(duration || 0).toFixed(1)} playing=${playing}`
+        )
         postHouseParty({ vpath: path, duration: duration || 0, position: position || 0, playing }).catch((e) =>
             console.warn("[houseparty] broadcast failed", e)
         )
@@ -568,24 +590,49 @@ function el(tag, props, ...children) {
     return e
 }
 
-function renderSortToggle() {
-    const cur = getSort()
-    const make = (val, label) => {
-        const btn = el("button", { className: "sort-pill" + (cur === val ? " active" : ""), type: "button" }, label)
+// A labelled group of mutually-exclusive pills (e.g. "Layout: List | Posters").
+// `current` is read fresh on each build; picking a non-current value runs
+// `onPick` then re-renders so the active pill and the view both update.
+function pillToggle(label, title, current, options, onPick) {
+    const group = el("div", { className: "sort-toggle", title }, el("span", { className: "sort-label" }, label))
+    for (const [val, text] of options) {
+        const btn = el("button", { className: "sort-pill" + (current === val ? " active" : ""), type: "button" }, text)
         btn.addEventListener("click", () => {
-            if (getSort() === val) return
-            setSort(val)
+            if (current === val) return
+            onPick(val)
             render()
         })
-        return btn
+        group.append(btn)
     }
-    return el(
-        "div",
-        { className: "sort-toggle", title: "Sort order" },
-        el("span", { className: "sort-label" }, "Sort"),
-        make("name", "Name"),
-        make("recent", "Recent")
-    )
+    return group
+}
+
+// Layout + Sort toggles for the header. Two independent controls (web has no
+// remote, so the tvOS single-axis Play/Pause cycle is split into clickable
+// pills). Returns an array so callers can spread it into headerActions.
+function renderViewToggles() {
+    return [
+        pillToggle(
+            "Layout",
+            "Layout",
+            getLayout(),
+            [
+                ["list", "List"],
+                ["posters", "Posters"]
+            ],
+            setLayout
+        ),
+        pillToggle(
+            "Sort",
+            "Sort order",
+            getSort(),
+            [
+                ["name", "Name"],
+                ["recent", "Recent"]
+            ],
+            setSort
+        )
+    ]
 }
 
 function clearHeaderActions() {
@@ -607,7 +654,7 @@ async function renderBrowse(path) {
     document.documentElement.classList.remove("player-active")
     renderCrumbs(path)
     clearHeaderActions()
-    headerActions.append(renderSortToggle())
+    headerActions.append(...renderViewToggles())
     app.replaceChildren(el("p", { className: "muted" }, "loading…"))
     let data
     try {
@@ -659,6 +706,15 @@ function renderSubdir(path, data) {
     // interleave by mtime so freshly-added content surfaces regardless of kind.
     const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => a.name.localeCompare(b.name))
 
+    // Posters layout: a 2:3 art grid in a scrollable body, mirroring the tvOS
+    // PosterGrid. No alphabet rail (it's a list-only affordance).
+    if (getLayout() === "posters") {
+        const body = el("div", { className: "col-body col-body-posters" }, buildPosterGrid(path, ordered))
+        const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
+        app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+        return
+    }
+
     const list = el("ul", { className: "col-list" })
     if (ordered.length === 0) list.append(el("li", { className: "col-empty" }, "(empty directory)"))
     for (const entry of ordered) {
@@ -674,6 +730,83 @@ function renderSubdir(path, data) {
 
     const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
     app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+}
+
+// Build the 2:3 poster grid for a directory listing. Dirs link to browse,
+// files to play — same destinations as the list rows. Each cell shows the
+// scan-discovered poster (with a tiered fallback handled server-side) or a
+// glyph fallback box when the entry has no poster at all.
+function buildPosterGrid(path, entries) {
+    const grid = el("div", { className: "poster-grid" })
+    if (entries.length === 0) {
+        grid.append(el("div", { className: "col-empty" }, "(empty directory)"))
+        return grid
+    }
+    for (const entry of entries) {
+        const full = path ? path + "/" + entry.name : entry.name
+        grid.append(makePosterCell(entry, full))
+    }
+    return grid
+}
+
+// The fallback art box: a panel-2 tile with a big dimmed type glyph, shown
+// when there's no poster image or the image fails to load.
+function posterFallback(glyph) {
+    return el("div", { className: "poster-fallback" }, el("span", { className: "poster-fallback-glyph" }, glyph))
+}
+
+// One poster cell: the 2:3 art box + a caption (type glyph + display name).
+// Files carry a Continue-Watching progress sliver when a resume point exists,
+// and dirs keep the hover 🍿 binge affordance from the list rows.
+function makePosterCell(entry, vpath) {
+    const isDir = entry.kind === "dir"
+    const href = (isDir ? "#/browse/" : "#/play/") + encodePath(vpath)
+    const glyph = isDir ? "📁" : "🎬"
+
+    const art = el("div", { className: "poster-art" })
+    if (entry.poster) {
+        const img = el("img", {
+            className: "poster-img",
+            loading: "lazy",
+            alt: "",
+            src: "/api/poster?path=" + encodeURIComponent(vpath)
+        })
+        // A 404 (race after a rescan, or a poster that vanished) falls back to
+        // the glyph box rather than a broken-image icon.
+        img.addEventListener("error", () => {
+            img.remove()
+            if (!art.querySelector(".poster-fallback")) art.prepend(posterFallback(glyph))
+        })
+        art.append(img)
+    } else {
+        art.append(posterFallback(glyph))
+    }
+
+    if (!isDir) {
+        const r = getResume(vpath)
+        if (r && r.dur > 0 && r.pos > 0) {
+            const frac = Math.max(0, Math.min(1, r.pos / r.dur))
+            art.append(
+                el(
+                    "div",
+                    { className: "poster-progress" },
+                    el("div", { className: "poster-progress-fill", style: `width:${(frac * 100).toFixed(1)}%` })
+                )
+            )
+        }
+    }
+
+    const caption = el(
+        "div",
+        { className: "poster-caption" },
+        el("span", { className: "poster-glyph" }, glyph),
+        el("span", { className: "poster-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
+    )
+    const link = el("a", { className: "poster-link" + (isDir ? " row-dir" : " row-file"), href }, art, caption)
+    const cell = el("div", { className: "poster-cell" }, link)
+    if (isDir) cell.append(bingeButton(vpath))
+    cell.dataset.name = entry.name
+    return cell
 }
 
 function basenameOf(path) {
@@ -1052,6 +1185,9 @@ function prettySize(n) {
 let activeVideo = null
 // What's currently playing, for the binge back-out rule. Set in renderPlay.
 let activePlay = null
+// Embedded-subtitle controller (PGS / ASS read straight from the MKV). Set in
+// renderPlay, torn down here so its worker + overlay canvases don't leak.
+let activeEmbeddedSubs = null
 
 function teardownPlayer() {
     // Back-out path for the binge rule: if the user leaves with ≥95% watched,
@@ -1079,6 +1215,14 @@ function teardownPlayer() {
             console.warn("[player] teardown threw", e)
         }
         activeVideo = null
+    }
+    if (activeEmbeddedSubs) {
+        try {
+            activeEmbeddedSubs.dispose()
+        } catch (e) {
+            console.warn("[embsubs] teardown threw", e)
+        }
+        activeEmbeddedSubs = null
     }
     if (window.duplexPlayer?.teardown) window.duplexPlayer.teardown()
     window.duplexPlayer = null
@@ -1469,9 +1613,17 @@ async function renderPlay(path, bingeId = null) {
     })
     const fsBtn = el("button", { className: "ctrl-btn ctrl-fs", title: "fullscreen" }, "⛶")
 
-    // Picker-opening buttons replace the old inline <select> dropdowns.
-    // One UI everywhere: click on desktop, OK on remote, both pop the same
-    // modal picker that already exists for tvOS.
+    // Playback-speed picker. The WebCodecs player drives its master clock at
+    // this multiplier (pitch shifts — no time-stretch). Resets to 1× per video.
+    const speedSel = el(
+        "select",
+        { className: "ctrl-speed", title: "Playback speed", "aria-label": "Playback speed" },
+        ...[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => el("option", { value: String(r) }, `${r}×`))
+    )
+    speedSel.value = "1"
+
+    // Picker-opening buttons replace inline <select> dropdowns: clicking (or
+    // Enter via keyboard focus) pops the same modal picker used for audio.
     const subBtn = el("button", { className: "ctrl-subs", type: "button", title: "Subtitles" }, "CC Off")
     // Show the audio button whenever the file has audio (even if only one
     // track, so an "unsupported" status is still visible). The icon flips
@@ -1500,14 +1652,13 @@ async function renderPlay(path, bingeId = null) {
         volumeSlider,
         audioBtn,
         subBtn,
+        speedSel,
         fsBtn
     )
 
     // Top-left back button. The page header is hidden during playback so the
     // crumb/home link is gone — without this, a mouse-only user has no way
-    // out of a video (and no reason to guess that Esc works). LRUD users can
-    // reach it via spatial nav too, but Menu/Escape is the faster path for
-    // them.
+    // out of a video (and no reason to guess that Esc works).
     const backBtn = el("button", { className: "ctrl-back", type: "button", title: "Back", "aria-label": "Back" }, "← Back")
     backBtn.addEventListener("click", (ev) => {
         ev.preventDefault()
@@ -1566,6 +1717,39 @@ async function renderPlay(path, bingeId = null) {
     activeVideo = controller
     activePlay = { path, bingeId, video: controller }
 
+    // Embedded subtitle tracks (PGS image subs + ASS styled text) live inside
+    // the MKV, where Mediabunny can't see them. This controller reads them over
+    // Range requests following the playhead and renders them — PGS as bitmaps,
+    // ASS via JASSUB with the file's embedded fonts. Set up async so it never
+    // delays first paint; selectable from the same subtitle picker.
+    let embeddedSubs = null
+    const vt0 = info.video_tracks?.[0] || {}
+    import("/embedded-subs.js")
+        .then(async ({ EmbeddedSubtitles }) => {
+            if (controller.disposed) return
+            embeddedSubs = new EmbeddedSubtitles({
+                rawUrl: info.raw_url,
+                stage,
+                videoWidth: vt0.width,
+                videoHeight: vt0.height,
+                getTimeSec: () => controller.currentTime,
+                isPaused: () => controller.paused
+            })
+            activeEmbeddedSubs = embeddedSubs
+            const embTracks = await embeddedSubs.init()
+            if (controller.disposed) {
+                embeddedSubs.dispose()
+                return
+            }
+            for (const t of embTracks) subOptions.push({ value: t.value, label: t.label })
+            // Restore a saved embedded choice now that its option exists (the
+            // synchronous restore below only sees sidecar/off, which load eagerly).
+            if (savedPrefs?.sub?.startsWith("embed:") && subOptions.some((o) => o.value === savedPrefs.sub)) {
+                applySubChoice(savedPrefs.sub)
+            }
+        })
+        .catch((e) => console.warn("[embsubs] init failed", e))
+
     // House Party: register this player so the store can fine-sync it (play/
     // pause + seek mirroring) and so backing out clears the room. The one-shot
     // "I started a video" announce fires from timeupdate once we have a duration.
@@ -1594,10 +1778,10 @@ async function renderPlay(path, bingeId = null) {
         controller.addEventListener("play", () => tapOverlay.remove(), { once: true })
     }
 
-    // Subtitle rendering. We deliberately avoid the native <track> element:
-    // tvOS UIWebView's VTT pipeline crashes on cue boundaries, and even on
-    // desktop the native renderer ignores our stage-anchored .cue-overlay
-    // positioning. Fetching + parsing in JS is the same code path everywhere.
+    // Sidecar subtitle rendering. We deliberately avoid the native <track>
+    // element: the browser's native renderer ignores our stage-anchored
+    // .cue-overlay positioning, and fetching + parsing in JS keeps one code
+    // path. (Embedded PGS/ASS tracks render separately, via embedded-subs.js.)
     let cueGen = 0
     let activeCues = []
     let subsRafId = null
@@ -1773,8 +1957,16 @@ async function renderPlay(path, bingeId = null) {
         subBtn.textContent = "CC " + label
         activeCues = []
         cueOverlay.textContent = ""
+        // Sidecar text, embedded tracks, and "Off" are mutually exclusive — any
+        // change first tears down the embedded (PGS/ASS) renderer.
+        embeddedSubs?.disable()
         if (!value) return
         const [kind, idxStr] = value.split(":")
+        if (kind === "embed") {
+            if (embeddedSubs) embeddedSubs.select(value)
+            else subBtn.textContent = "CC ⚠ " + label + " (loading…)"
+            return
+        }
         if (kind !== "sidecar") {
             console.warn(`[subs] unsupported track kind: ${kind}`)
             subBtn.textContent = "CC ⚠ " + label + " (unsupported)"
@@ -1880,6 +2072,9 @@ async function renderPlay(path, bingeId = null) {
 
     subBtn.addEventListener("click", openSubsPicker)
     if (audioBtn) audioBtn.addEventListener("click", openAudioPicker)
+    speedSel.addEventListener("change", () => {
+        video.playbackRate = parseFloat(speedSel.value)
+    })
 
     // Restore the remembered subtitle choice (audio is applied at boot via
     // startAudioOrd above). Only if the saved value still maps to a real
