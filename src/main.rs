@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -36,6 +37,31 @@ async fn main() -> Result<()> {
     );
 
     library::watcher::spawn(library.clone(), cli.watch_debounce_ms)?;
+
+    // The event watcher can't see changes on network filesystems (CIFS/SMB
+    // never deliver inotify/FSEvents events), so re-scan every root on a fixed
+    // interval and atomically swap the fresh tree in. The scan is blocking,
+    // network-bound I/O — run it on a blocking thread so it never stalls the
+    // async runtime.
+    if cli.rescan_secs > 0 {
+        let lib = library.clone();
+        let period = Duration::from_secs(cli.rescan_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            tick.tick().await; // first tick is immediate; the startup scan already covered it
+            loop {
+                tick.tick().await;
+                let scan_lib = lib.clone();
+                match tokio::task::spawn_blocking(move || library::scan::scan(&scan_lib)).await {
+                    Ok(tree) => {
+                        lib.replace(tree);
+                        tracing::debug!("background rescan complete");
+                    }
+                    Err(e) => tracing::warn!("background rescan task failed: {e}"),
+                }
+            }
+        });
+    }
 
     let state = AppState {
         library,

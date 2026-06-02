@@ -10,6 +10,13 @@ const app = document.getElementById("app")
 const crumbs = document.getElementById("crumbs")
 const headerActions = document.getElementById("header-actions")
 
+// Bumped by the header "Refresh" button and appended to poster URLs as `&r=N`
+// (see `posterUrl`). The library is re-scanned automatically server-side on an
+// interval, so Refresh is a freshness *nudge*, not a server reload: changing
+// the nonce forces the browser to re-fetch art that may have changed in place
+// (same path, new bytes). The web analogue of tvOS's LibraryRefresh nonce.
+let posterNonce = 0
+
 // Smoke test for the --js-logs pipeline. Gated behind ?smoketest=1 so default
 // boots stay quiet; visit /?smoketest=1 to re-prove the full chain end-to-end.
 if (window.__DUPLEX_CONFIG__?.jsLogs && new URLSearchParams(location.search).get("smoketest") === "1") {
@@ -488,6 +495,23 @@ function setupHousePartyToggle() {
     updateHousePartyToggle()
 }
 
+// Header "Refresh" control (the web analogue of the tvOS Home Refresh row).
+// The server re-scans the library on its own interval, so this doesn't reload
+// server state — it bumps the poster nonce to bust the browser's image cache
+// and re-renders the current view, surfacing whatever the latest background
+// re-scan picked up. Created once; the player-active CSS hides the whole header
+// during playback.
+function setupRefreshButton() {
+    const btn = el("button", { className: "refresh-button", type: "button", title: "Refresh" }, "⟳")
+    btn.addEventListener("click", () => {
+        posterNonce++
+        render()
+    })
+    const header = document.querySelector("header")
+    const settingsLink = header.querySelector(".settings-link")
+    header.insertBefore(btn, settingsLink)
+}
+
 function updateHousePartyToggle() {
     const btn = houseParty._toggleEl
     if (!btn) return
@@ -755,6 +779,13 @@ function posterFallback(glyph) {
     return el("div", { className: "poster-fallback" }, el("span", { className: "poster-fallback-glyph" }, glyph))
 }
 
+// Poster image URL for a vpath, carrying the current refresh nonce so the
+// header "Refresh" button can force a re-fetch of art that changed in place.
+function posterUrl(vpath) {
+    const base = "/api/poster?path=" + encodeURIComponent(vpath)
+    return posterNonce ? base + "&r=" + posterNonce : base
+}
+
 // One poster cell: the 2:3 art box + a caption (type glyph + display name).
 // Files carry a Continue-Watching progress sliver when a resume point exists,
 // and dirs keep the hover 🍿 binge affordance from the list rows.
@@ -769,7 +800,7 @@ function makePosterCell(entry, vpath) {
             className: "poster-img",
             loading: "lazy",
             alt: "",
-            src: "/api/poster?path=" + encodeURIComponent(vpath)
+            src: posterUrl(vpath)
         })
         // A 404 (race after a rescan, or a poster that vanished) falls back to
         // the glyph box rather than a broken-image icon.
@@ -2482,6 +2513,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // whole page lifetime (so the status stays live even when not joined, and
     // joining can mirror immediately). Reconciliation is gated on `joined`.
     setupHousePartyToggle()
+    setupRefreshButton()
     houseParty.pollOnce()
     setInterval(() => houseParty.pollOnce(), HOUSE_PARTY_POLL_MS)
     if (!location.hash) location.hash = "#/browse/"

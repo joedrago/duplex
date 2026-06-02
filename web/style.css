@@ -965,6 +965,25 @@ details pre {
     border-radius: 6px;
 }
 
+/* Right-hand glyph chrome actions: Refresh (⟳) and Settings (⚙). Same muted
+ * glyph treatment; Refresh is a <button>, so it also needs the native-button
+ * reset (background/border/font). */
+.refresh-button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.2rem 0.45rem;
+    border-radius: 6px;
+    transition: color 0.12s ease;
+}
+.refresh-button:hover {
+    color: var(--accent);
+}
+
 .settings-link {
     color: var(--muted);
     text-decoration: none;

@@ -32,6 +32,14 @@ pub struct Cli {
     #[arg(long, value_name = "MS", default_value_t = 300)]
     pub watch_debounce_ms: u64,
 
+    /// Interval, in seconds, between full background re-scans of every library
+    /// root. The event watcher is blind to network filesystems — CIFS/SMB
+    /// mounts never deliver inotify/FSEvents notifications — so a periodic
+    /// re-scan is the only way new files there are ever noticed. 0 disables it,
+    /// leaving just the startup scan and the event watcher.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    pub rescan_secs: u64,
+
     /// Allow any origin (CORS). Off by default; turn on if serving the dev
     /// web client from a different port.
     #[arg(long, default_value_t = false)]
