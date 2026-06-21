@@ -15,6 +15,17 @@ pub struct Cli {
     #[arg(long = "library", value_name = "PATH", required = true, num_args = 1)]
     pub libraries: Vec<PathBuf>,
 
+    /// A *hidden* library root. Mounted, watched, and playable exactly like
+    /// `--library`, but withheld from every listing — it never shows up in the
+    /// root browse, "recently added", search, or folder-flatten. The only way
+    /// it surfaces is by typing its exact, case-sensitive basename into search,
+    /// which returns it as a single browseable directory; from there it behaves
+    /// like any other library. Repeat for multiple hidden roots. A hidden root
+    /// may not share a basename with any other root, hidden or visible.
+    /// Example: `--hidden /mnt/nas/ABC123`
+    #[arg(long = "hidden", value_name = "PATH", num_args = 1)]
+    pub hidden: Vec<PathBuf>,
+
     /// Address to bind the HTTP server.
     #[arg(
         long,

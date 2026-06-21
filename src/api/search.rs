@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
-use crate::library::{Dir, Node};
+use crate::library::{Dir, Library, Node};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/search", get(search))
@@ -70,7 +70,27 @@ pub async fn search(
 
     let tree = state.library.snapshot();
     let mut hits: Vec<(u8, Item)> = Vec::new();
-    walk(&tree.root, String::new(), &needle, &mut hits);
+    walk(&tree.root, String::new(), &needle, &state.library, &mut hits);
+
+    // Hidden-library reveal: an exact, case-sensitive match of the raw query
+    // against a hidden root's name surfaces that root as a single browseable
+    // directory — the only listing it ever appears in. Its contents are never
+    // searched; only the whole-name knock opens the door. Ranked 0 so it sorts
+    // among the other exact matches.
+    let exact = q.q.trim();
+    if state.library.is_hidden_root(exact) {
+        if let Some(Node::Dir(d)) = tree.root.children.get(exact) {
+            hits.push((
+                0,
+                Item::Dir {
+                    name: exact.to_string(),
+                    vpath: exact.to_string(),
+                    mtime: epoch_seconds(d.mtime),
+                    children: d.children.len(),
+                },
+            ));
+        }
+    }
 
     // Sort: lower rank first, then by name case-insensitively.
     hits.sort_by(|a, b| {
@@ -88,8 +108,14 @@ fn name(item: &Item) -> &str {
     }
 }
 
-fn walk(dir: &Dir, prefix: String, needle: &str, out: &mut Vec<(u8, Item)>) {
+fn walk(dir: &Dir, prefix: String, needle: &str, lib: &Library, out: &mut Vec<(u8, Item)>) {
     for (name, node) in &dir.children {
+        // Hidden roots are withheld from substring search entirely — the root
+        // and its whole subtree. They surface only via the exact-name reveal in
+        // `search`. Only a top-level child (empty prefix) can be a root.
+        if prefix.is_empty() && lib.is_hidden_root(name) {
+            continue;
+        }
         let vpath = if prefix.is_empty() {
             name.clone()
         } else {
@@ -118,7 +144,7 @@ fn walk(dir: &Dir, prefix: String, needle: &str, out: &mut Vec<(u8, Item)>) {
             }
         }
         if let Node::Dir(d) = node {
-            walk(d, vpath, needle, out);
+            walk(d, vpath, needle, lib, out);
         }
     }
 }

@@ -366,7 +366,7 @@ mod tests {
     }
 
     fn lib_for(root: &Path) -> (Library, Vec<Root>) {
-        let lib = Library::new(&[root.to_path_buf()]).unwrap();
+        let lib = Library::new(&[root.to_path_buf()], &[]).unwrap();
         let roots = (*lib.roots).clone();
         (lib, roots)
     }

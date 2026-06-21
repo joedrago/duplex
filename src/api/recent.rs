@@ -81,6 +81,9 @@ pub async fn recent(
 
     let mut items: Vec<Item> = Vec::new();
     for (lib_name, lib_node) in &tree.root.children {
+        if state.library.is_hidden_root(lib_name) {
+            continue;
+        }
         let Node::Dir(lib) = lib_node else { continue };
         for (name, node) in &lib.children {
             let vpath = format!("{lib_name}/{name}");

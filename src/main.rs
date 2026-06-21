@@ -23,11 +23,12 @@ async fn main() -> Result<()> {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         roots = cli.libraries.len(),
+        hidden = cli.hidden.len(),
         bind = %cli.bind,
         "starting duplex",
     );
 
-    let library = Library::new(&cli.libraries)?;
+    let library = Library::new(&cli.libraries, &cli.hidden)?;
     let tree = library::scan::scan(&library);
     library.replace(tree);
     tracing::info!(

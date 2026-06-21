@@ -24,6 +24,15 @@ pub const POSTER_EXTS: &[&str] = &["jpg", "jpeg"];
 pub struct Root {
     pub name: String,
     pub path: PathBuf,
+
+    /// When true this root is mounted, watched, and playable by exact vpath
+    /// like any other, but withheld from every enumeration surface — root
+    /// browse, "recently added", folder-flatten, and substring search. It
+    /// surfaces only when the search query is an exact, case-sensitive match
+    /// for `name`, which returns it as a single browseable directory. See
+    /// `Library::is_hidden_root` and the guards in the `api` enumeration
+    /// handlers.
+    pub hidden: bool,
 }
 
 /// A node in the in-memory tree. Directories own their children by name;
@@ -156,39 +165,54 @@ pub struct Library {
 }
 
 impl Library {
-    /// Build a Library from a list of root paths. Returns an error if two
-    /// roots collide on basename — the user must rename one of them.
-    pub fn new(paths: &[PathBuf]) -> Result<Self> {
-        let mut roots: Vec<Root> = Vec::with_capacity(paths.len());
-        for p in paths {
-            let canonical = std::fs::canonicalize(p)
-                .map_err(|e| anyhow!("library path {}: {}", p.display(), e))?;
-            let name = canonical
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| anyhow!("library path {} has no usable basename", p.display()))?
-                .to_string();
-            if roots.iter().any(|r| r.name == name) {
-                return Err(anyhow!(
-                    "two library roots share the basename {:?}: rename one of them on disk",
-                    name
-                ));
+    /// Build a Library from visible (`--library`) and hidden (`--hidden`) root
+    /// paths. Both kinds are mounted into the same virtual namespace and are
+    /// addressable, browseable, and playable by vpath; hidden roots merely set
+    /// `Root::hidden` so the API can filter them out of every enumeration
+    /// surface (see `is_hidden_root`). Returns an error if any two roots —
+    /// regardless of kind — collide on basename, since they would then be
+    /// indistinguishable by vpath; the user must rename one on disk.
+    pub fn new(visible: &[PathBuf], hidden: &[PathBuf]) -> Result<Self> {
+        let mut roots: Vec<Root> = Vec::with_capacity(visible.len() + hidden.len());
+        for (paths, is_hidden) in [(visible, false), (hidden, true)] {
+            for p in paths {
+                let canonical = std::fs::canonicalize(p)
+                    .map_err(|e| anyhow!("library path {}: {}", p.display(), e))?;
+                let name = canonical
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| anyhow!("library path {} has no usable basename", p.display()))?
+                    .to_string();
+                if roots.iter().any(|r| r.name == name) {
+                    return Err(anyhow!(
+                        "two library roots share the basename {:?}: rename one of them on disk",
+                        name
+                    ));
+                }
+                if !canonical.is_dir() {
+                    return Err(anyhow!(
+                        "library path {} is not a directory",
+                        canonical.display()
+                    ));
+                }
+                roots.push(Root {
+                    name,
+                    path: canonical,
+                    hidden: is_hidden,
+                });
             }
-            if !canonical.is_dir() {
-                return Err(anyhow!(
-                    "library path {} is not a directory",
-                    canonical.display()
-                ));
-            }
-            roots.push(Root {
-                name,
-                path: canonical,
-            });
         }
         Ok(Self {
             roots: Arc::new(roots),
             inner: Arc::new(ArcSwap::from_pointee(Tree::default())),
         })
+    }
+
+    /// Whether `name` (a top-level virtual directory / library basename) belongs
+    /// to a `--hidden` root. The API enumeration handlers consult this to keep
+    /// hidden roots out of root browse, recent, flatten-from-root, and search.
+    pub fn is_hidden_root(&self, name: &str) -> bool {
+        self.roots.iter().any(|r| r.hidden && r.name == name)
     }
 
     /// Replace the entire tree (used after a full scan).

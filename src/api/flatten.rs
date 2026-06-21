@@ -64,7 +64,22 @@ pub async fn flatten(
     };
 
     let mut vpaths = Vec::new();
-    collect(dir, &origin, &mut vpaths);
+    if origin.is_empty() {
+        // Flattening the virtual root: skip hidden roots so "binge everything"
+        // never pulls in --hidden content. Flattening *inside* a hidden root
+        // (origin non-empty) is fine — you already knew the path to get there.
+        for (name, node) in &dir.children {
+            if state.library.is_hidden_root(name) {
+                continue;
+            }
+            match node {
+                Node::File(_) => vpaths.push(name.clone()),
+                Node::Dir(sub) => collect(sub, name, &mut vpaths),
+            }
+        }
+    } else {
+        collect(dir, &origin, &mut vpaths);
+    }
 
     Json(FlattenResponse { origin, vpaths }).into_response()
 }

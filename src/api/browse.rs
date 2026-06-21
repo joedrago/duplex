@@ -104,6 +104,7 @@ pub async fn browse(
             .library
             .roots
             .iter()
+            .filter(|r| !r.hidden)
             .filter_map(|r| dir.children.get_key_value(&r.name))
             .collect()
     } else {
