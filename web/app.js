@@ -718,6 +718,7 @@ function renderRoot(data) {
     columns.append(renderQueueColumn())
 
     app.replaceChildren(columns)
+    focusListingScroller()
 }
 
 // Subdir view: one full-width column with the directory listing + alphabet
@@ -736,6 +737,7 @@ function renderSubdir(path, data) {
         const body = el("div", { className: "col-body col-body-posters" }, buildPosterGrid(path, ordered))
         const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
         app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+        focusListingScroller()
         return
     }
 
@@ -754,6 +756,7 @@ function renderSubdir(path, data) {
 
     const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
     app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+    focusListingScroller()
 }
 
 // Build the 2:3 poster grid for a directory listing. Dirs link to browse,
@@ -1391,6 +1394,7 @@ async function renderSearch(query) {
         el("div", { className: "col-body" }, list)
     )
     app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
+    focusListingScroller()
 }
 
 // Keep the always-visible header search box in sync with the route. Skipped
@@ -2367,6 +2371,29 @@ function render() {
     else if (r.kind === "search") renderSearch(r.query)
     else renderBrowse(r.path)
     syncSearchBox()
+}
+
+// Listing scrollers are bare overflow:auto elements — not focusable, and
+// clicking one doesn't focus it, so the browser has no target for the native
+// PageUp/PageDown/Arrow/Home/End scroll keys (html and main are
+// overflow:hidden, so the page itself never scrolls). After a browse/search
+// render, tag the real scrollers focusable and move focus onto the primary one
+// so those keys just work. Focus is only stolen when nothing meaningful holds
+// it (activeElement is <body>) — never from the header search box mid-type or a
+// control the user tabbed to. Clicking a column's empty area focuses that
+// column's scroller, so PageDown then follows the column you're looking at.
+function focusListingScroller() {
+    const scrollers = []
+    for (const node of app.querySelectorAll(".col-list, .queue-stack, .col-body-posters")) {
+        const oy = getComputedStyle(node).overflowY
+        if (oy !== "auto" && oy !== "scroll") continue
+        node.tabIndex = -1
+        scrollers.push(node)
+    }
+    const active = document.activeElement
+    if (active && active !== document.body) return
+    const target = scrollers.find((s) => s.scrollHeight > s.clientHeight) || scrollers[0]
+    target?.focus({ preventScroll: true })
 }
 
 // Find the nearest ancestor that actually scrolls vertically. Walks up until

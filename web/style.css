@@ -254,6 +254,16 @@ main:has(.settings-page) {
 .col-list::-webkit-scrollbar {
     display: none;
 }
+
+/* These scrollers receive programmatic focus (see focusListingScroller in
+ * app.js) purely so the native PageUp/PageDown/Arrow/Home/End keys have a
+ * scroll target — the focus is a mechanism, not a visible affordance, so no
+ * ring. They carry tabindex="-1", so they're never in the Tab order. */
+.col-list:focus,
+.queue-stack:focus,
+.col-body-posters:focus {
+    outline: none;
+}
 .col-empty {
     padding: 0.7rem 1rem;
     color: var(--muted);
