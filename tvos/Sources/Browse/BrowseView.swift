@@ -144,7 +144,9 @@ struct BrowseView: View {
     }
 
     private func firstLetter(of name: String) -> String {
-        guard let first = name.unicodeScalars.first else { return "#" }
+        // Bucket by the same key the list sorts on, so "The Accountant" lands
+        // under A along with where the rail jumps to.
+        guard let first = DuplexFormat.sortName(name).unicodeScalars.first else { return "#" }
         if CharacterSet.letters.contains(first) {
             return String(first).uppercased()
         }
@@ -480,7 +482,17 @@ struct BrowseView: View {
     private func sortedEntriesList(_ entries: [Entry]) -> [Entry] {
         switch viewPref.sort {
         case .name:
-            return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            // Compare on the article-stripped key, then fall back to the full
+            // name so "Matrix" vs "The Matrix" has a stable, defined order
+            // (Swift's sort isn't stable and needs a strict weak ordering).
+            return entries.sorted { a, b in
+                switch DuplexFormat.sortName(a.name)
+                    .localizedCaseInsensitiveCompare(DuplexFormat.sortName(b.name)) {
+                case .orderedAscending:  return true
+                case .orderedDescending: return false
+                case .orderedSame:       return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                }
+            }
         case .recent:
             return entries.sorted { $0.mtime > $1.mtime }
         }

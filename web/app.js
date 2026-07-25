@@ -663,6 +663,39 @@ function clearHeaderActions() {
     headerActions.replaceChildren()
 }
 
+// Leading English articles alphabetical sorting looks past, longest first so
+// "An Officer" isn't read as the article "A". The separators cover spaced
+// names ("The Accountant") and dotted/underscored scene names
+// ("A.History.of.Violence"); hyphens are deliberately absent so "A-Team" keeps
+// its "A".
+const SORT_ARTICLES = ["the", "an", "a"]
+const SORT_SEPARATORS = new Set([" ", ".", "_"])
+
+// The key a name sorts and buckets under: the name with a leading article
+// dropped, so "The Accountant" files under A and "A History of Violence" under
+// H. The article only goes when a real title follows it — an entry named just
+// "The" still sorts under T. Names are never rewritten, only reordered.
+// Mirrors DuplexFormat.sortName on tvOS; keep the two in step.
+function sortName(name) {
+    const s = name || ""
+    for (const article of SORT_ARTICLES) {
+        if (s.length <= article.length) continue
+        if (s.slice(0, article.length).toLowerCase() !== article) continue
+        let i = article.length
+        if (!SORT_SEPARATORS.has(s[i])) continue
+        while (i < s.length && SORT_SEPARATORS.has(s[i])) i++
+        if (i >= s.length) continue
+        return s.slice(i)
+    }
+    return s
+}
+
+// Compare two entry names alphabetically, ignoring a leading article. Falls
+// back to the full name so "Matrix" vs "The Matrix" has a defined order.
+function compareByName(a, b) {
+    return sortName(a).localeCompare(sortName(b)) || a.localeCompare(b)
+}
+
 function sortEntries(entries, mode) {
     if (mode !== "recent") return entries
     // Stable secondary by name so equal mtimes (or zero mtimes from unknown
@@ -729,7 +762,7 @@ function renderSubdir(path, data) {
     // alphabet rail lands on whatever entry actually starts with a letter
     // instead of skating past a wall of folders. With Recent sort they already
     // interleave by mtime so freshly-added content surfaces regardless of kind.
-    const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => a.name.localeCompare(b.name))
+    const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => compareByName(a.name, b.name))
 
     // Posters layout: a 2:3 art grid in a scrollable body, mirroring the tvOS
     // PosterGrid. No alphabet rail (it's a list-only affordance).
@@ -1155,9 +1188,11 @@ function renderLibrariesColumn(data) {
 }
 
 // Bucket an entry name's first character into "#"+A..Z so the rail can map
-// a letter to matching rows quickly. Non-ASCII letters fall into "#".
+// a letter to matching rows quickly. Non-ASCII letters fall into "#". Buckets
+// on the same article-stripped key the list sorts by, so the rail's A holds
+// "The Accountant" right where the ordering put it.
 function firstLetterBucket(name) {
-    const c = (name || "").trimStart().charAt(0).toUpperCase()
+    const c = sortName(name).trimStart().charAt(0).toUpperCase()
     if (c >= "A" && c <= "Z") return c
     return "#"
 }

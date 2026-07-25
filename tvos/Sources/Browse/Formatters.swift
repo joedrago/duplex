@@ -70,6 +70,34 @@ enum DuplexFormat {
         return (lead, paren)
     }
 
+    /// Leading English articles that alphabetical sorting looks past, longest
+    /// first so "An Officer" doesn't get read as the article "A".
+    private static let sortArticles = ["the", "an", "a"]
+
+    /// Characters that can sit between a leading article and the real title.
+    /// Covers spaced names ("The Accountant") and dotted/underscored scene
+    /// names ("A.History.of.Violence"). Hyphens are deliberately absent so
+    /// "A-Team" keeps its "A".
+    private static let sortSeparators: Set<Character> = [" ", ".", "_"]
+
+    /// The key a name sorts and buckets under: the name with a leading article
+    /// dropped, so "The Accountant" files under A and "A History of Violence"
+    /// under H. The article only goes when a real title follows it — a folder
+    /// named just "The" still sorts under T. The name itself is never rewritten;
+    /// this only changes ordering.
+    static func sortName(_ name: String) -> String {
+        for article in sortArticles {
+            guard name.count > article.count,
+                  name.prefix(article.count).lowercased() == article else { continue }
+            var rest = name.dropFirst(article.count)
+            guard let sep = rest.first, sortSeparators.contains(sep) else { continue }
+            while let c = rest.first, sortSeparators.contains(c) { rest = rest.dropFirst() }
+            guard !rest.isEmpty else { continue }
+            return String(rest)
+        }
+        return name
+    }
+
     /// Everything before the last slash, for showing context. Empty if none.
     static func parent(of vpath: String) -> String {
         if let i = vpath.lastIndex(of: "/") {
