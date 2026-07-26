@@ -45,6 +45,10 @@ pub enum Entry {
         /// Whether a poster image is available for this directory (its own
         /// sidecar `.jpg` or an inherited ancestor poster).
         poster: bool,
+        /// Public-Letterboxd status for this entry when it correlates to a
+        /// harvested film (movie folders). Omitted when there's no match.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
     File {
         name: String,
@@ -53,6 +57,10 @@ pub enum Entry {
         mtime: i64,
         /// Whether a sidecar poster image is available via `/api/poster`.
         poster: bool,
+        /// Public-Letterboxd status for this movie file when it correlates to a
+        /// harvested film. Omitted when there's no match.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
 }
 
@@ -94,6 +102,10 @@ pub async fn browse(
     // with no explicit poster falls back to the nearest enclosing dir poster.
     let inherited_poster = tree.inherited_dir_poster(&vpath_norm).is_some();
 
+    // One overlay snapshot for the whole listing; each entry is correlated to a
+    // harvested Letterboxd film by its name (a no-op when the overlay is empty).
+    let overlay = state.letterboxd.overlay();
+
     let mut entries = Vec::with_capacity(dir.children.len());
 
     // At the virtual root, emit library roots in CLI order (the order the user
@@ -118,6 +130,7 @@ pub async fn browse(
                 children: d.children.len(),
                 mtime: epoch_seconds(d.mtime),
                 poster: d.poster.is_some() || inherited_poster,
+                letterboxd: overlay.annotate(name),
             }),
             Node::File(f) => {
                 entries.push(Entry::File {
@@ -126,6 +139,7 @@ pub async fn browse(
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
                     poster: f.poster.is_some() || inherited_poster,
+                    letterboxd: overlay.annotate(name),
                 });
             }
         }

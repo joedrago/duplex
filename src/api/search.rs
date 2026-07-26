@@ -49,12 +49,16 @@ pub enum Item {
         vpath: String,
         mtime: i64,
         children: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
     File {
         name: String,
         vpath: String,
         mtime: i64,
         size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
 }
 
@@ -69,8 +73,16 @@ pub async fn search(
     }
 
     let tree = state.library.snapshot();
+    let overlay = state.letterboxd.overlay();
     let mut hits: Vec<(u8, Item)> = Vec::new();
-    walk(&tree.root, String::new(), &needle, &state.library, &mut hits);
+    walk(
+        &tree.root,
+        String::new(),
+        &needle,
+        &state.library,
+        &overlay,
+        &mut hits,
+    );
 
     // Hidden-library reveal: an exact, case-sensitive match of the raw query
     // against a hidden root's name surfaces that root as a single browseable
@@ -87,6 +99,7 @@ pub async fn search(
                     vpath: exact.to_string(),
                     mtime: epoch_seconds(d.mtime),
                     children: d.children.len(),
+                    letterboxd: None,
                 },
             ));
         }
@@ -108,7 +121,14 @@ fn name(item: &Item) -> &str {
     }
 }
 
-fn walk(dir: &Dir, prefix: String, needle: &str, lib: &Library, out: &mut Vec<(u8, Item)>) {
+fn walk(
+    dir: &Dir,
+    prefix: String,
+    needle: &str,
+    lib: &Library,
+    overlay: &crate::letterboxd::Overlay,
+    out: &mut Vec<(u8, Item)>,
+) {
     for (name, node) in &dir.children {
         // Hidden roots are withheld from substring search entirely — the root
         // and its whole subtree. They surface only via the exact-name reveal in
@@ -130,6 +150,7 @@ fn walk(dir: &Dir, prefix: String, needle: &str, lib: &Library, out: &mut Vec<(u
                         vpath: vpath.clone(),
                         mtime: epoch_seconds(d.mtime),
                         children: d.children.len(),
+                        letterboxd: overlay.annotate(name),
                     },
                 )),
                 Node::File(f) => out.push((
@@ -139,12 +160,13 @@ fn walk(dir: &Dir, prefix: String, needle: &str, lib: &Library, out: &mut Vec<(u
                         vpath: vpath.clone(),
                         mtime: epoch_seconds(f.mtime),
                         size: f.size,
+                        letterboxd: overlay.annotate(name),
                     },
                 )),
             }
         }
         if let Node::Dir(d) = node {
-            walk(d, vpath, needle, lib, out);
+            walk(d, vpath, needle, lib, overlay, out);
         }
     }
 }

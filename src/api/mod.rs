@@ -7,12 +7,14 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Cli;
+use crate::letterboxd::Letterboxd;
 use crate::library::Library;
 
 pub mod browse;
 pub mod debug;
 pub mod flatten;
 pub mod houseparty;
+pub mod letterboxd;
 pub mod manifest;
 pub mod next;
 pub mod poster;
@@ -30,6 +32,10 @@ pub struct AppState {
     pub cfg: Arc<Cli>,
     /// Shared "House Party" fake-player state — see `houseparty`.
     pub houseparty: houseparty::HouseParty,
+
+    /// Public-Letterboxd overlay handle (empty/no-op when `--letterboxd` is
+    /// unset). Reads via `overlay()`; the Refresh endpoint calls `refresh()`.
+    pub letterboxd: Letterboxd,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -55,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .merge(next::routes())
         .merge(flatten::routes())
         .merge(search::routes())
+        .merge(letterboxd::routes())
         .merge(houseparty::routes())
         .merge(debug::routes())
         .merge(web::routes())

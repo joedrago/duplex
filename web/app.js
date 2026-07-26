@@ -17,6 +17,145 @@ const headerActions = document.getElementById("header-actions")
 // (same path, new bytes). The web analogue of tvOS's LibraryRefresh nonce.
 let posterNonce = 0
 
+// --- Letterboxd overlay ---------------------------------------------------
+// The server annotates browse/recent/search entries with an optional
+// `letterboxd` field: { watched:[{account,rating,liked}], watchlist:[name,…] }.
+// It's present only on entries that correlate to a harvested public-Letterboxd
+// film, so most non-movie entries carry nothing. The account list (name + dot
+// color) is fetched once at boot to drive the dots, the focus detail, and the
+// By-person / On-watchlist filters. All empty when `--letterboxd` is unset —
+// every helper below then no-ops and the UI is unchanged.
+let lbAccounts = []
+const lbColor = {}
+async function loadLbAccounts() {
+    try {
+        const d = await getJSON("/api/letterboxd/accounts")
+        lbAccounts = d.accounts || []
+        for (const a of lbAccounts) lbColor[a.name] = a.color
+    } catch {
+        lbAccounts = []
+    }
+}
+
+// Active browse filter — in memory only (a transient lens, not a saved
+// preference). One of: null (off), `seen:<name>`, `unseen:<name>`, "watchlist".
+let lbFilter = null
+
+// Does this entry pass the active Letterboxd filter? Always true when off.
+// `unseen` is scoped to files so a folder never reads as an "unwatched movie".
+function lbFilterPass(entry) {
+    if (!lbFilter) return true
+    const lb = entry.letterboxd
+    const seenBy = (name) => !!lb?.watched?.some((w) => w.account === name)
+    if (lbFilter === "watchlist") return !!lb?.watchlist?.length
+    const [kind, name] = lbFilter.split(":")
+    if (kind === "seen") return seenBy(name)
+    if (kind === "unseen") return entry.kind === "file" && !seenBy(name)
+    return true
+}
+
+// A colored status dot: filled for a watched account, hollow ring for a
+// watchlist-only one. `--lb` carries the account's color.
+function lbDot(color, extraClass, title) {
+    return el("span", {
+        className: "lb-dot" + (extraClass ? " " + extraClass : ""),
+        title: title || "",
+        style: `--lb:${color || "#8b98a5"}`
+    })
+}
+
+// Half-star rating (0.5–5.0) as ★/½ glyphs.
+function lbStars(stars) {
+    const full = Math.floor(stars)
+    return "★".repeat(full) + (stars - full >= 0.5 ? "½" : "")
+}
+
+// Compact rating for list rows: each rated account's stars (+ ❤ if loved),
+// joined. Returns a gold span, or null when there's no rating/heart to show.
+function lbRatingSpan(lb) {
+    if (!lb || !lb.watched) return null
+    const parts = []
+    for (const w of lb.watched) {
+        if (w.rating) parts.push(lbStars(w.rating) + (w.liked ? " ❤" : ""))
+        else if (w.liked) parts.push("❤")
+    }
+    return parts.length ? el("span", { className: "row-rating" }, parts.join("   ")) : null
+}
+
+// A `.row-meta` div ending in the Letterboxd rating (after the recency marker),
+// when the entry has one. Keeps the rating at the same size as the meta text.
+function metaWithRating(text, lb) {
+    const meta = el("div", { className: "row-meta" }, text)
+    const rating = lbRatingSpan(lb)
+    if (rating) {
+        meta.append(document.createTextNode(" · "))
+        meta.append(rating)
+    }
+    return meta
+}
+
+// The Letterboxd status line for the Details page: one item per person with
+// their rating (or "seen") + a ❤ when loved, and a dim "watchlist" item for
+// anyone who's only queued it. Returns null when there's nothing to show.
+function lbDetailsLine(lb) {
+    if (!lb) return null
+    const row = el("div", { className: "details-lb" })
+    const seen = new Set()
+    for (const w of lb.watched || []) {
+        seen.add(w.account)
+        row.append(
+            el(
+                "span",
+                { className: "details-lb-item" },
+                lbDot(lbColor[w.account], null, ""),
+                el("span", { className: "details-lb-name" }, w.account),
+                el("span", { className: "details-lb-stars" }, w.rating ? lbStars(w.rating) : "seen"),
+                w.liked ? el("span", { className: "details-lb-heart" }, "❤") : null
+            )
+        )
+    }
+    for (const name of (lb.watchlist || []).filter((n) => !seen.has(n))) {
+        row.append(
+            el(
+                "span",
+                { className: "details-lb-item details-lb-watchlist" },
+                lbDot(lbColor[name], "lb-dot-watchlist", ""),
+                el("span", { className: "details-lb-name" }, name),
+                el("span", { className: "details-lb-stars" }, "watchlist")
+            )
+        )
+    }
+    return row.childElementCount ? row : null
+}
+
+// The header filter control (subdir view only, when accounts are configured).
+// A single compact dropdown so it stays narrow no matter how many accounts
+// there are: "Letterboxd: all" | "<person> · seen" | "<person> · unseen" |
+// "On a watchlist". The selected label doubles as the control's own label.
+function renderLbFilter() {
+    const current = lbFilter || "all"
+    const sel = el("select", {
+        className: "lb-filter-select",
+        title: "Filter by Letterboxd status",
+        "aria-label": "Letterboxd filter"
+    })
+    const opts = [["all", "Letterboxd: all"]]
+    for (const a of lbAccounts) {
+        opts.push([`seen:${a.name}`, `${a.name} · seen`], [`unseen:${a.name}`, `${a.name} · unseen`])
+    }
+    opts.push(["watchlist", "On a watchlist"])
+    for (const [val, text] of opts) {
+        const o = el("option", { value: val }, text)
+        if (current === val) o.selected = true
+        sel.append(o)
+    }
+    sel.addEventListener("change", () => {
+        lbFilter = sel.value === "all" ? null : sel.value
+        render()
+    })
+    return sel
+}
+
 // Smoke test for the --js-logs pipeline. Gated behind ?smoketest=1 so default
 // boots stay quiet; visit /?smoketest=1 to re-prove the full chain end-to-end.
 if (window.__DUPLEX_CONFIG__?.jsLogs && new URLSearchParams(location.search).get("smoketest") === "1") {
@@ -505,6 +644,10 @@ function setupRefreshButton() {
     const btn = el("button", { className: "refresh-button", type: "button", title: "Refresh" }, "⟳")
     btn.addEventListener("click", () => {
         posterNonce++
+        // Piggyback the server-side Letterboxd harvest on the one Refresh
+        // gesture. Fire-and-forget: the harvest runs in the background and the
+        // overlay swaps in when it finishes (a re-navigate picks up new dots).
+        fetch("/api/refresh", { method: "POST" }).catch(() => {})
         render()
     })
     const header = document.querySelector("header")
@@ -558,20 +701,25 @@ function parseRoute() {
     // Search query is a single whole-string-encoded segment (may contain "/").
     const sm = h.match(/^\/search\/(.*)$/)
     if (sm) return { kind: "search", query: decodeURIComponent(sm[1] || "") }
-    const m = h.match(/^\/(browse|play)\/(.*)$/)
+    const m = h.match(/^\/(browse|play|details)\/(.*)$/)
     if (!m) return { kind: "browse", path: "" }
     let rest = m[2] || ""
-    // Optional query suffix on the play route carries the binge binding:
+    // Optional query suffix on the play route carries the binge binding and a
+    // "start from the beginning" flag (ignore the saved resume point):
     //   #/play/<path>?binge=<id>   — finishing advances that binge
     //   #/play/<path>?binge=none   — explicitly "just play it" (skip chooser)
+    //   #/play/<path>?begin=1      — Play from Beginning (Details page)
     let bingeId = null
+    let begin = false
     const qIdx = rest.indexOf("?")
     if (qIdx >= 0) {
-        bingeId = new URLSearchParams(rest.slice(qIdx + 1)).get("binge")
+        const params = new URLSearchParams(rest.slice(qIdx + 1))
+        bingeId = params.get("binge")
+        begin = params.get("begin") === "1"
         rest = rest.slice(0, qIdx)
     }
     const path = rest.split("/").map(decodeURIComponent).filter(Boolean).join("/")
-    return { kind: m[1], path, bingeId }
+    return { kind: m[1], path, bingeId, begin }
 }
 
 function renderCrumbs(path, clickable) {
@@ -712,6 +860,8 @@ async function renderBrowse(path) {
     renderCrumbs(path)
     clearHeaderActions()
     headerActions.append(...renderViewToggles())
+    // Letterboxd filter belongs on directory listings (not the root columns).
+    if (path !== "" && lbAccounts.length) headerActions.append(renderLbFilter())
     app.replaceChildren(el("p", { className: "muted" }, "loading…"))
     let data
     try {
@@ -763,11 +913,15 @@ function renderSubdir(path, data) {
     // instead of skating past a wall of folders. With Recent sort they already
     // interleave by mtime so freshly-added content surfaces regardless of kind.
     const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => compareByName(a.name, b.name))
+    // Letterboxd filter (By person / On watchlist), applied over the current
+    // listing only. No-op when off.
+    const filtered = lbFilter ? ordered.filter(lbFilterPass) : ordered
+    const emptyMsg = lbFilter ? "(no matches for this filter)" : "(empty directory)"
 
     // Posters layout: a 2:3 art grid in a scrollable body, mirroring the tvOS
     // PosterGrid. No alphabet rail (it's a list-only affordance).
     if (getLayout() === "posters") {
-        const body = el("div", { className: "col-body col-body-posters" }, buildPosterGrid(path, ordered))
+        const body = el("div", { className: "col-body col-body-posters" }, buildPosterGrid(path, filtered, emptyMsg))
         const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
         app.replaceChildren(el("div", { className: "columns columns-subdir" }, col))
         focusListingScroller()
@@ -775,16 +929,16 @@ function renderSubdir(path, data) {
     }
 
     const list = el("ul", { className: "col-list" })
-    if (ordered.length === 0) list.append(el("li", { className: "col-empty" }, "(empty directory)"))
-    for (const entry of ordered) {
+    if (filtered.length === 0) list.append(el("li", { className: "col-empty" }, emptyMsg))
+    for (const entry of filtered) {
         const full = path ? path + "/" + entry.name : entry.name
         list.append(makeBrowseRow(entry, full))
     }
 
     const body = el("div", { className: "col-body" }, list)
     const ALPHABET_RAIL_THRESHOLD = 20
-    if (ordered.length >= ALPHABET_RAIL_THRESHOLD) {
-        body.append(buildAlphabetRail(ordered, list))
+    if (filtered.length >= ALPHABET_RAIL_THRESHOLD) {
+        body.append(buildAlphabetRail(filtered, list))
     }
 
     const col = el("section", { className: "col col-subdir" }, columnHeader(basenameOf(path) || "Library"), body)
@@ -796,10 +950,10 @@ function renderSubdir(path, data) {
 // files to play — same destinations as the list rows. Each cell shows the
 // scan-discovered poster (with a tiered fallback handled server-side) or a
 // glyph fallback box when the entry has no poster at all.
-function buildPosterGrid(path, entries) {
+function buildPosterGrid(path, entries, emptyMsg = "(empty directory)") {
     const grid = el("div", { className: "poster-grid" })
     if (entries.length === 0) {
-        grid.append(el("div", { className: "col-empty" }, "(empty directory)"))
+        grid.append(el("div", { className: "col-empty" }, emptyMsg))
         return grid
     }
     for (const entry of entries) {
@@ -827,7 +981,8 @@ function posterUrl(vpath) {
 // and dirs keep the hover 🍿 binge affordance from the list rows.
 function makePosterCell(entry, vpath) {
     const isDir = entry.kind === "dir"
-    const href = (isDir ? "#/browse/" : "#/play/") + encodePath(vpath)
+    // Selecting a movie opens its Details page; folders browse.
+    const href = (isDir ? "#/browse/" : "#/details/") + encodePath(vpath)
     const glyph = isDir ? "📁" : "🎬"
 
     const art = el("div", { className: "poster-art" })
@@ -869,7 +1024,11 @@ function makePosterCell(entry, vpath) {
         el("span", { className: "poster-glyph" }, glyph),
         el("span", { className: "poster-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
     )
-    const link = el("a", { className: "poster-link" + (isDir ? " row-dir" : " row-file"), href }, art, caption)
+    // Rating tucked directly under the title.
+    const captionCol = el("div", { className: "poster-captioncol" }, caption)
+    const rating = lbRatingSpan(entry.letterboxd)
+    if (rating) captionCol.append(el("div", { className: "poster-rating" }, rating))
+    const link = el("a", { className: "poster-link" + (isDir ? " row-dir" : " row-file"), href }, art, captionCol)
     const cell = el("div", { className: "poster-cell" }, link)
     if (isDir) cell.append(bingeButton(vpath))
     cell.dataset.name = entry.name
@@ -904,19 +1063,16 @@ function nameParts(name) {
 
 function makeBrowseRow(entry, vpath) {
     const isDir = entry.kind === "dir"
-    const href = isDir ? "#/browse/" + encodePath(vpath) : "#/play/" + encodePath(vpath)
+    // Selecting a movie opens its Details page; folders browse.
+    const href = (isDir ? "#/browse/" : "#/details/") + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
     const name = el("div", { className: "row-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
         : [prettySize(entry.size), entry.ext].filter(Boolean)
-    const meta = el("div", { className: "row-meta" }, metaParts.join(" · "))
-    const link = el(
-        "a",
-        { className: "row-link" + (isDir ? " row-dir" : " row-file"), href },
-        icon,
-        el("div", { className: "row-text" }, name, meta)
-    )
+    const meta = metaWithRating(metaParts.join(" · "), entry.letterboxd)
+    const text = el("div", { className: "row-text" }, name, meta)
+    const link = el("a", { className: "row-link" + (isDir ? " row-dir" : " row-file"), href }, icon, text)
     const row = el("li", { className: "col-row" }, link)
     if (isDir) row.append(bingeButton(vpath))
     row.dataset.name = entry.name
@@ -1032,7 +1188,7 @@ async function fetchAndPopulateRecent(col) {
         const basename = parts.pop()
         const parent = parts.join(" / ")
         const isDir = it.kind === "dir"
-        const href = (isDir ? "#/browse/" : "#/play/") + encodePath(it.vpath)
+        const href = (isDir ? "#/browse/" : "#/details/") + encodePath(it.vpath)
         const metaLeft = isDir ? `${it.children} ${it.children === 1 ? "entry" : "entries"}` : prettySize(it.size)
         const link = el(
             "a",
@@ -1043,7 +1199,7 @@ async function fetchAndPopulateRecent(col) {
                 { className: "row-text" },
                 parent ? el("div", { className: "row-context" }, parent) : null,
                 el("div", { className: "row-name" }, ...nameParts(isDir ? basename : displayName(basename))),
-                el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(it.mtime)}`)
+                metaWithRating(`${metaLeft} · ${formatRelative(it.mtime)}`, it.letterboxd)
             )
         )
         const row = el("li", { className: "col-row" }, link)
@@ -1378,7 +1534,7 @@ function makeResultRow(item) {
     const basename = parts.pop()
     const parent = parts.join(" / ")
     const isDir = item.kind === "dir"
-    const href = (isDir ? "#/browse/" : "#/play/") + encodePath(item.vpath)
+    const href = (isDir ? "#/browse/" : "#/details/") + encodePath(item.vpath)
     const metaLeft = isDir ? `${item.children} ${item.children === 1 ? "entry" : "entries"}` : prettySize(item.size)
     const link = el(
         "a",
@@ -1389,7 +1545,7 @@ function makeResultRow(item) {
             { className: "row-text" },
             parent ? el("div", { className: "row-context" }, parent) : null,
             el("div", { className: "row-name" }, isDir ? basename : displayName(basename)),
-            el("div", { className: "row-meta" }, `${metaLeft} · ${formatRelative(item.mtime)}`)
+            metaWithRating(`${metaLeft} · ${formatRelative(item.mtime)}`, item.letterboxd)
         )
     )
     const row = el("li", { className: "col-row" }, link)
@@ -1537,7 +1693,97 @@ function settingsRow(title, status, actionLabel, onClick, disabled) {
     )
 }
 
-async function renderPlay(path, bingeId = null) {
+// Details page: selecting a movie lands here (not straight into playback). The
+// poster sits on the right; the title, Letterboxd status, and description on the
+// left; and a bottom-left menu — Continue / Play from Beginning / Play / Back.
+async function renderDetails(vpath) {
+    document.documentElement.classList.remove("player-active")
+    clearHeaderActions()
+    renderCrumbs(vpath.split("/").slice(0, -1).join("/"))
+    app.replaceChildren(el("p", { className: "muted" }, "loading…"))
+
+    let d
+    try {
+        d = await getJSON("/api/details?path=" + encodeURIComponent(vpath))
+    } catch (e) {
+        app.replaceChildren(el("div", { className: "error" }, "details failed: " + e.message))
+        return
+    }
+
+    const posterBox = el("div", { className: "details-poster" })
+    if (d.poster) {
+        const img = el("img", { className: "details-poster-img", alt: "", src: posterUrl(vpath) })
+        img.addEventListener("error", () => {
+            img.remove()
+            posterBox.append(el("div", { className: "details-poster-fallback" }, "🎬"))
+        })
+        posterBox.append(img)
+    } else {
+        posterBox.append(el("div", { className: "details-poster-fallback" }, "🎬"))
+    }
+
+    const title = el(
+        "h1",
+        { className: "details-title" },
+        d.title || displayName(d.name),
+        d.year ? el("span", { className: "details-year" }, ` (${d.year})`) : null
+    )
+
+    const left = el(
+        "div",
+        { className: "details-left" },
+        title,
+        d.tagline ? el("p", { className: "details-tagline" }, d.tagline) : null,
+        lbDetailsLine(d.letterboxd),
+        d.description ? el("p", { className: "details-desc" }, d.description) : null,
+        el("div", { className: "details-menu" }, ...detailsMenu(vpath))
+    )
+
+    app.replaceChildren(el("div", { className: "details" }, left, posterBox))
+    const first = document.querySelector(".details-menu .details-btn")
+    if (first) first.focus()
+}
+
+// The bottom-left action menu for a Details page: Continue + Play-from-Beginning
+// when a resume point exists; a single Play otherwise; always a Back.
+function detailsMenu(vpath) {
+    const play = "#/play/" + encodePath(vpath) + "?binge=none"
+    const items = []
+    const r = getResume(vpath)
+    if (r && r.dur > 0 && r.pos > 0 && r.pos < r.dur * 0.98) {
+        const pct = Math.round((r.pos / r.dur) * 100)
+        items.push(detailsBtn("▶  Continue", play, true, `${fmtClock(r.pos)} of ${fmtClock(r.dur)} · ${pct}%`))
+        items.push(detailsBtn("↻  Play from Beginning", "#/play/" + encodePath(vpath) + "?begin=1&binge=none"))
+    } else {
+        items.push(detailsBtn("▶  Play", play, true))
+    }
+    items.push(detailsBtn("←  Back", null))
+    return items
+}
+
+function detailsBtn(label, href, primary = false, subtitle = null) {
+    const cls = "details-btn" + (primary ? " details-btn-primary" : "")
+    const inner = [el("span", { className: "details-btn-label" }, label)]
+    if (subtitle) inner.push(el("span", { className: "details-btn-sub" }, subtitle))
+    if (href) return el("a", { className: cls, href }, ...inner)
+    const btn = el("button", { className: cls, type: "button" }, ...inner)
+    btn.addEventListener("click", () => {
+        if (history.length > 1) history.back()
+        else location.hash = "#/browse/"
+    })
+    return btn
+}
+
+// Seconds → H:MM:SS or M:SS for the Continue subtitle.
+function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec))
+    const h = Math.floor(sec / 3600)
+    const m = Math.floor((sec % 3600) / 60)
+    const pad = (n) => String(n).padStart(2, "0")
+    return h > 0 ? `${h}:${pad(m)}:${pad(sec % 60)}` : `${m}:${pad(sec % 60)}`
+}
+
+async function renderPlay(path, bingeId = null, begin = false) {
     teardownPlayer()
     clearHeaderActions()
     document.documentElement.classList.add("player-active")
@@ -1748,7 +1994,10 @@ async function renderPlay(path, bingeId = null) {
     // Resume position from localStorage. The controller seeks here once
     // metadata is ready; attachPlayerControls below also wires the periodic
     // heartbeat that persists position back as playback advances.
+    // "Play from Beginning" (Details page) passes begin=true to ignore the saved
+    // resume point and start at 0; the heartbeat still records new progress.
     const startAt = (() => {
+        if (begin) return 0
         const entry = getResume(path)
         return entry?.pos > 0 ? entry.pos : 0
     })()
@@ -2401,8 +2650,9 @@ function render() {
     if (r.kind !== "play" || isChooser) teardownPlayer()
     if (r.kind === "play") {
         if (isChooser) renderBingeChooser(r.path)
-        else renderPlay(r.path, r.bingeId === "none" ? null : r.bingeId)
-    } else if (r.kind === "settings") renderSettings()
+        else renderPlay(r.path, r.bingeId === "none" ? null : r.bingeId, r.begin)
+    } else if (r.kind === "details") renderDetails(r.path)
+    else if (r.kind === "settings") renderSettings()
     else if (r.kind === "search") renderSearch(r.query)
     else renderBrowse(r.path)
     syncSearchBox()
@@ -2578,6 +2828,12 @@ window.addEventListener("DOMContentLoaded", () => {
     setupRefreshButton()
     houseParty.pollOnce()
     setInterval(() => houseParty.pollOnce(), HOUSE_PARTY_POLL_MS)
+    // Fetch the Letterboxd account list (colors) once; re-render a browse/search
+    // view when it lands so dots + the filter control appear. No-op if unset.
+    loadLbAccounts().then(() => {
+        const kind = parseRoute().kind
+        if (kind === "browse" || kind === "search") render()
+    })
     if (!location.hash) location.hash = "#/browse/"
     render()
 })

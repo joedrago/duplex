@@ -8,10 +8,12 @@ use tokio::signal;
 
 mod api;
 mod config;
+mod letterboxd;
 mod library;
 
 use crate::api::AppState;
 use crate::config::Cli;
+use crate::letterboxd::Letterboxd;
 use crate::library::Library;
 
 #[tokio::main]
@@ -64,10 +66,24 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Public-Letterboxd overlay. A no-op when `--letterboxd` is unset; otherwise
+    // harvest once now, in the background, so the server starts serving
+    // immediately and the overlay fills in over the next minute or two. From
+    // here on it only ever refreshes on a client's manual Refresh.
+    let letterboxd = Letterboxd::new(cli.letterboxd.clone());
+    if letterboxd.is_configured() {
+        tracing::info!(
+            accounts = cli.letterboxd.len(),
+            "letterboxd overlay enabled; kicking startup harvest",
+        );
+        letterboxd.refresh();
+    }
+
     let state = AppState {
         library,
         cfg: Arc::new(cli.clone()),
         houseparty: api::houseparty::new(),
+        letterboxd,
     };
     let app = api::router(state);
 

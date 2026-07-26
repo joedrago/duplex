@@ -47,6 +47,8 @@ pub enum Item {
         children: usize,
         /// Whether a sidecar poster image is available for this directory.
         poster: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
     File {
         name: String,
@@ -55,6 +57,8 @@ pub enum Item {
         size: u64,
         /// Whether a sidecar poster image is available via `/api/poster`.
         poster: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        letterboxd: Option<crate::letterboxd::Annotation>,
     },
 }
 
@@ -78,6 +82,7 @@ pub async fn recent(
 ) -> impl IntoResponse {
     let limit = q.limit.clamp(1, 100);
     let tree = state.library.snapshot();
+    let overlay = state.letterboxd.overlay();
 
     let mut items: Vec<Item> = Vec::new();
     for (lib_name, lib_node) in &tree.root.children {
@@ -94,6 +99,7 @@ pub async fn recent(
                     mtime: epoch_seconds(d.mtime),
                     children: d.children.len(),
                     poster: d.poster.is_some(),
+                    letterboxd: overlay.annotate(name),
                 }),
                 Node::File(f) => items.push(Item::File {
                     name: name.clone(),
@@ -101,6 +107,7 @@ pub async fn recent(
                     mtime: epoch_seconds(f.mtime),
                     size: f.size,
                     poster: f.poster.is_some(),
+                    letterboxd: overlay.annotate(name),
                 }),
             }
         }

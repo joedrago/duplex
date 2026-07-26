@@ -26,6 +26,19 @@ pub struct Cli {
     #[arg(long = "hidden", value_name = "PATH", num_args = 1)]
     pub hidden: Vec<PathBuf>,
 
+    /// A public Letterboxd account (username) to overlay onto the library.
+    /// Repeat for several family members. On startup — and again whenever a
+    /// client hits Refresh — the server harvests each account's *public* watched
+    /// films, ratings, hearts, and watchlist from letterboxd.com and correlates
+    /// them, by title+year, to matching movies on disk. This is read-only and
+    /// never persisted: the overlay lives only in memory and is re-fetched from
+    /// scratch on boot. There is deliberately no polling timer — a harvest runs
+    /// only at startup and on manual Refresh — to stay a polite visitor. Empty
+    /// disables the feature entirely.
+    /// Example: `--letterboxd joedrago --letterboxd janedoe`
+    #[arg(long = "letterboxd", value_name = "ACCOUNT", num_args = 1)]
+    pub letterboxd: Vec<String>,
+
     /// Address to bind the HTTP server.
     #[arg(
         long,
