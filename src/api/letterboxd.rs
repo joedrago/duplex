@@ -17,8 +17,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{vpath, AppState};
-use crate::letterboxd::{Account, Annotation};
-use crate::library::{Dir, Library, Node, VIDEO_EXTS};
+use crate::letterboxd::{Account, Annotation, Overlay};
+use crate::library::{scan, Dir, Library, Meta, Node, VIDEO_EXTS};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -41,6 +41,19 @@ async fn accounts(State(state): State<AppState>) -> Json<AccountsResponse> {
 
 async fn refresh(State(state): State<AppState>) -> StatusCode {
     state.letterboxd.refresh();
+
+    // Also re-walk the library. Sidecar JSON is read at scan time, so without
+    // this an edited `Movie.json` would never reach a client — and Refresh is
+    // the one gesture users have. Blocking I/O over a possibly-networked mount,
+    // hence spawn_blocking; the swap is atomic and clients see it on their
+    // follow-up browse/recent.
+    let lib = state.library.clone();
+    tokio::task::spawn_blocking(move || {
+        let tree = scan::scan(&lib);
+        lib.replace(tree);
+        tracing::info!("library rescanned on refresh");
+    });
+
     StatusCode::ACCEPTED
 }
 
@@ -48,21 +61,6 @@ async fn refresh(State(state): State<AppState>) -> StatusCode {
 struct DetailsQuery {
     #[serde(default)]
     path: String,
-}
-
-/// The optional sidecar JSON that can sit next to a movie + poster
-/// (`Birdman (2014).json`). Every field is optional; the two ids give an
-/// *exact* Letterboxd match, the rest feed the Details page.
-#[derive(Deserialize, Default)]
-struct Sidecar {
-    /// Letterboxd slug (`birdman`) or full film URL. Exact match.
-    letterboxd: Option<String>,
-    /// TMDB movie id. Exact match (alternative to `letterboxd`).
-    tmdb: Option<u32>,
-    title: Option<String>,
-    description: Option<String>,
-    tagline: Option<String>,
-    year: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -100,40 +98,96 @@ async fn details(
     let overlay = state.letterboxd.overlay();
 
     let name = vpath.rsplit('/').next().unwrap_or(&vpath).to_string();
-    let (is_dir, abs_path, own_poster) = match node {
-        Node::File(f) => (false, Some(f.abs_path.clone()), f.poster.is_some()),
-        Node::Dir(d) => (true, None, d.poster.is_some()),
+    // The sidecar was parsed at scan time and rides on the node — the very same
+    // `Meta` that browse/search/recent annotate from, so Details can never
+    // disagree with the row the user selected to get here. Movie *folders*
+    // carry one too, via the dir-poster naming convention.
+    let (is_dir, own_poster, meta) = match node {
+        Node::File(f) => (false, f.poster.is_some(), f.meta.as_ref()),
+        Node::Dir(d) => (true, d.poster.is_some(), d.meta.as_ref()),
     };
 
-    // Sidecar JSON (files only): `Movie (Year).json` beside the video.
-    let sidecar: Sidecar = abs_path
-        .as_ref()
-        .map(|p| p.with_extension("json"))
-        .filter(|p| p.is_file())
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    // Exact match via the sidecar id first; fall back to the title/year matcher.
-    let letterboxd = overlay
-        .annotate_id(sidecar.letterboxd.as_deref(), sidecar.tmdb)
-        .or_else(|| overlay.annotate(&name));
-
-    let (parsed_title, parsed_year) = display_title_year(&name);
+    let (title, year) = effective_title_year(&name, meta);
+    let letterboxd = annotate_entry(&overlay, &name, meta);
     let parent = vpath.rsplit_once('/').map_or("", |(p, _)| p);
 
     Json(DetailsResponse {
-        title: sidecar.title.unwrap_or(parsed_title),
-        year: sidecar.year.or(parsed_year),
+        title,
+        year,
         poster: own_poster || tree.inherited_dir_poster(parent).is_some(),
         is_dir,
-        description: sidecar.description,
-        tagline: sidecar.tagline,
+        description: meta.and_then(|m| m.description.clone()),
+        tagline: meta.and_then(|m| m.tagline.clone()),
         letterboxd,
         vpath,
         name,
     })
     .into_response()
+}
+
+/// The title and year an entry *presents* as: the sidecar JSON's when it
+/// supplies them, else parsed from the filename. This is what every client
+/// displays, sorts by, and buckets under in the A-Z rail.
+///
+/// `name` is deliberately untouched by this — it stays the real filename, so
+/// vpaths, poster URLs, playback, and focus identity are unaffected by a
+/// sidecar. Likewise mtime: `Recently Added` stays keyed to the video file, not
+/// to when someone edited its JSON.
+pub fn effective_title_year(name: &str, meta: Option<&Meta>) -> (String, Option<u16>) {
+    let (parsed_title, parsed_year) = display_title_year(name);
+    match meta {
+        Some(m) => (
+            m.title.clone().unwrap_or(parsed_title),
+            m.year.or(parsed_year),
+        ),
+        None => (parsed_title, parsed_year),
+    }
+}
+
+/// The title/year to put *on the wire* for a list entry. `Some` only when a
+/// sidecar actually has something to say about the entry's identity, so a
+/// library with no sidecars serialises exactly the bytes it always did and
+/// clients keep their filename derivation as the default path.
+///
+/// When it does fire, both halves are resolved together — a sidecar that sets
+/// only `year` still gets its title filled in from the filename — so the client
+/// never has to blend two sources to render one label.
+pub fn sidecar_title_year(name: &str, meta: Option<&Meta>) -> (Option<String>, Option<u16>) {
+    let Some(m) = meta else {
+        return (None, None);
+    };
+    if m.title.is_none() && m.year.is_none() {
+        return (None, None);
+    }
+    let (title, year) = effective_title_year(name, Some(m));
+    (Some(title), year)
+}
+
+/// Correlate one entry to a harvested film. A sidecar's `letterboxd`/`tmdb` id
+/// is exact and wins outright; failing that, the title/year guesser runs over
+/// the *effective* title, so a sidecar that fixes a mangled name also fixes the
+/// match without needing an explicit id.
+pub fn annotate_entry(overlay: &Overlay, name: &str, meta: Option<&Meta>) -> Option<Annotation> {
+    if let Some(m) = meta {
+        if let Some(a) = overlay.annotate_id(m.letterboxd.as_deref(), m.tmdb) {
+            return Some(a);
+        }
+        if let Some(title) = &m.title {
+            // Feed the guesser a `Title (Year)` shaped probe — the same shape
+            // it expects from a filename — so the year still participates.
+            let probe = match m.year.or_else(|| display_title_year(name).1) {
+                Some(y) => format!("{title} ({y})"),
+                None => title.clone(),
+            };
+            // Falls through to the filename on a miss: a sidecar that renames a
+            // film to something Letterboxd doesn't know must never *lose* the
+            // match the filename would have found on its own.
+            if let Some(a) = overlay.annotate(&probe) {
+                return Some(a);
+            }
+        }
+    }
+    overlay.annotate(name)
 }
 
 /// Split a raw entry name into a display title + year, keeping original casing.

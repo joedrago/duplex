@@ -9,6 +9,7 @@ struct GridEntryRow: View {
     let title: String
     let subtitle: String?
     let meta: String?
+    var rating: String? = nil
     let isFocused: Bool
 
     var body: some View {
@@ -16,7 +17,7 @@ struct GridEntryRow: View {
             Rectangle()
                 .fill(isFocused ? DuplexColor.accent : Color.clear)
                 .frame(width: DuplexMetric.selectedBar)
-            EntryRowLabel(icon: icon, title: title, subtitle: subtitle, meta: meta)
+            EntryRowLabel(icon: icon, title: title, subtitle: subtitle, meta: meta, rating: rating)
                 .padding(.vertical, DuplexMetric.rowVPad)
                 .padding(.horizontal, DuplexMetric.rowHPad)
         }

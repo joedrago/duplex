@@ -18,6 +18,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::api::letterboxd::{annotate_entry, sidecar_title_year};
 use crate::api::AppState;
 use crate::library::{Dir, Library, Node};
 
@@ -51,6 +52,13 @@ pub enum Item {
         children: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         letterboxd: Option<crate::letterboxd::Annotation>,
+
+        // Sidecar-supplied display identity; see the same fields on browse's
+        // `Entry`. Absent unless a sidecar overrides the filename.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        year: Option<u16>,
     },
     File {
         name: String,
@@ -59,6 +67,12 @@ pub enum Item {
         size: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         letterboxd: Option<crate::letterboxd::Annotation>,
+
+        // See the matching fields on `Dir`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        year: Option<u16>,
     },
 }
 
@@ -100,6 +114,10 @@ pub async fn search(
                     mtime: epoch_seconds(d.mtime),
                     children: d.children.len(),
                     letterboxd: None,
+                    // A library root, not a title — it presents under the name
+                    // the user knocked with, sidecar or not.
+                    title: None,
+                    year: None,
                 },
             ));
         }
@@ -141,7 +159,21 @@ fn walk(
         } else {
             format!("{prefix}/{name}")
         };
-        if let Some(rank) = match_rank(name, needle) {
+        // A sidecar title is searchable in its own right: a file on disk as
+        // `tt0088763.mkv` titled "Back to the Future" has to be findable by the
+        // title the user actually sees. Best rank of the two wins.
+        let meta = match node {
+            Node::Dir(d) => d.meta.as_ref(),
+            Node::File(f) => f.meta.as_ref(),
+        };
+        let (side_title, side_year) = sidecar_title_year(name, meta);
+        let rank = match_rank(name, needle).into_iter().chain(
+            side_title
+                .as_deref()
+                .filter(|t| *t != name)
+                .and_then(|t| match_rank(t, needle)),
+        );
+        if let Some(rank) = rank.min() {
             match node {
                 Node::Dir(d) => out.push((
                     rank,
@@ -150,7 +182,9 @@ fn walk(
                         vpath: vpath.clone(),
                         mtime: epoch_seconds(d.mtime),
                         children: d.children.len(),
-                        letterboxd: overlay.annotate(name),
+                        letterboxd: annotate_entry(overlay, name, meta),
+                        title: side_title,
+                        year: side_year,
                     },
                 )),
                 Node::File(f) => out.push((
@@ -160,7 +194,9 @@ fn walk(
                         vpath: vpath.clone(),
                         mtime: epoch_seconds(f.mtime),
                         size: f.size,
-                        letterboxd: overlay.annotate(name),
+                        letterboxd: annotate_entry(overlay, name, meta),
+                        title: side_title,
+                        year: side_year,
                     },
                 )),
             }

@@ -107,6 +107,8 @@ struct PosterCell: View {
     let title: String
     /// Optional second line under the title (e.g. binge "N remaining" / parent).
     var subtitle: String? = nil
+    /// Optional Letterboxd rating (gold ★), tucked under the title.
+    var rating: String? = nil
     /// Optional 0...1 progress sliver drawn under the box (Continue Watching).
     var progress: Double? = nil
     let isFocused: Bool
@@ -142,10 +144,16 @@ struct PosterCell: View {
                         .foregroundStyle(DuplexColor.muted)
                         .lineLimit(1)
                 }
+                if let rating, !rating.isEmpty {
+                    Text(rating)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(DuplexColor.accent)
+                        .lineLimit(1)
+                }
             }
-            // Reserve room for two title lines (+ optional subtitle) so cells in
-            // a row align even when names differ in length.
-            .frame(height: subtitle == nil ? 40 : 56, alignment: .top)
+            // Reserve room for two title lines (+ optional subtitle / rating) so
+            // cells in a row align even when names differ in length.
+            .frame(height: 40 + (subtitle == nil ? 0 : 16) + (rating == nil ? 0 : 16), alignment: .top)
             .frame(maxWidth: .infinity)
         }
         .scaleEffect(isFocused ? 1.05 : 1.0)

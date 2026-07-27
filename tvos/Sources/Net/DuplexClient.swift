@@ -65,6 +65,25 @@ struct DuplexClient {
         return try await getJSON("/api/search", query: ["q": q, "limit": String(limit)])
     }
 
+    /// `/api/details?path=<vpath>` — Details-screen metadata for one title:
+    /// display title/year, poster availability, optional sidecar description,
+    /// and the Letterboxd status.
+    func details(path: String) async throws -> DetailsResponse {
+        try await getJSON("/api/details", query: ["path": path])
+    }
+
+    /// `/api/letterboxd/accounts` — configured accounts + dot colors. Empty when
+    /// the server was started without `--letterboxd`.
+    func letterboxdAccounts() async throws -> LbAccountsResponse {
+        try await getJSON("/api/letterboxd/accounts", query: [:])
+    }
+
+    /// `POST /api/refresh` — the server side of the Home Refresh gesture: kick a
+    /// fresh Letterboxd harvest (coalesced server-side). Fire-and-forget.
+    func refresh() async throws {
+        try await send("/api/refresh", method: "POST", jsonBody: nil)
+    }
+
     // MARK: House Party
 
     /// `GET /api/houseparty` — the shared fake-player state.

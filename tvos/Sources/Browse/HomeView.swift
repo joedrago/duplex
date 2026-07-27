@@ -186,15 +186,15 @@ struct HomeView: View {
         case .library(let name):
             if let entry = libraryEntries.first(where: { $0.name == name }) {
                 switch entry {
-                case .dir(let n, _, _, _):           nav.push(.browse(path: n))
-                case .file(let n, _, _, _, _):    nav.play(vpath: n)
+                case .dir(let n, _, _, _, _, _):        nav.push(.browse(path: n))
+                case .file(let n, _, _, _, _, _, _):    nav.push(.details(vpath: n))
                 }
             }
         case .recent(let id):
             if let item = recentItems.first(where: { $0.id == id }) {
                 switch item {
-                case .dir(_, let vpath, _, _, _):    nav.push(.browse(path: vpath))
-                case .file(_, let vpath, _, _, _):   nav.play(vpath: vpath)
+                case .dir(_, let vpath, _, _, _, _, _):    nav.push(.browse(path: vpath))
+                case .file(_, let vpath, _, _, _, _, _):   nav.push(.details(vpath: vpath))
                 }
             }
         case .binge(let id):
@@ -204,7 +204,9 @@ struct HomeView: View {
                 nav.play(vpath: front, bingeId: binge.id)
             }
         case .continueWatching(let vpath):
-            nav.play(vpath: vpath)
+            // Details, not straight into playback — same as every other title
+            // route. Its Continue button picks the resume position back up.
+            nav.push(.details(vpath: vpath))
         case .houseParty:
             if houseParty.joined { houseParty.leave() } else { houseParty.join() }
         case .refresh:
@@ -214,7 +216,11 @@ struct HomeView: View {
             // showing stale/blank art reloads).
             PosterImageCache.shared.clear()
             refresh.bump()
-            Task { await vm.reload() }
+            Task {
+                // Piggyback the server-side Letterboxd re-harvest on Refresh.
+                try? await client.refresh()
+                await vm.reload()
+            }
         case .settings:
             nav.push(.settings)
         case .search:
@@ -407,20 +413,21 @@ struct HomeView: View {
     private func libraryRow(_ entry: Entry) -> some View {
         let key = HomeFocus.library(entry.name)
         switch entry {
-        case .dir(let name, let children, _, _):
+        case .dir(_, let children, _, _, _, _):
             GridEntryRow(
                 icon: "📁",
-                title: name,
+                title: entry.displayTitle,
                 subtitle: nil,
                 meta: "\(children) entries",
                 isFocused: focus == key
             )
-        case .file(let name, _, let size, _, _):
+        case .file(_, _, let size, _, _, _, _):
             GridEntryRow(
                 icon: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: entry.displayTitle,
                 subtitle: nil,
                 meta: DuplexFormat.size(size),
+                rating: entry.letterboxd?.compactRating,
                 isFocused: focus == key
             )
         }
@@ -480,18 +487,19 @@ struct HomeView: View {
     private func recentPosterCell(_ item: RecentItem) -> some View {
         let isFocused = focus == .recent(item.id)
         switch item {
-        case .dir(let name, let vpath, _, _, let hasPoster):
+        case .dir(_, let vpath, _, _, let hasPoster, _, _):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: vpath, cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "📁",
-                title: name,
+                title: item.displayTitle,
                 isFocused: isFocused
             )
-        case .file(let name, let vpath, _, _, let hasPoster):
+        case .file(_, let vpath, _, _, let hasPoster, _, _):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: vpath, cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: item.displayTitle,
+                rating: item.letterboxd?.compactRating,
                 isFocused: isFocused
             )
         }
@@ -502,20 +510,21 @@ struct HomeView: View {
         let parent = DuplexFormat.parent(of: item.vpath)
         let key = HomeFocus.recent(item.id)
         switch item {
-        case .dir(let name, _, let mtime, let children, _):
+        case .dir(_, _, let mtime, let children, _, _, _):
             GridEntryRow(
                 icon: "📁",
-                title: name,
+                title: item.displayTitle,
                 subtitle: parent,
                 meta: "\(children) · \(DuplexFormat.relative(mtime))",
                 isFocused: focus == key
             )
-        case .file(let name, _, let mtime, let size, _):
+        case .file(_, _, let mtime, let size, _, _, _):
             GridEntryRow(
                 icon: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: item.displayTitle,
                 subtitle: parent,
                 meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))",
+                rating: item.letterboxd?.compactRating,
                 isFocused: focus == key
             )
         }

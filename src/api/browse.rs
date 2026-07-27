@@ -6,6 +6,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::api::letterboxd::{annotate_entry, sidecar_title_year};
 use crate::api::{vpath, AppState};
 use crate::library::Node;
 
@@ -49,6 +50,15 @@ pub enum Entry {
         /// harvested film (movie folders). Omitted when there's no match.
         #[serde(skip_serializing_if = "Option::is_none")]
         letterboxd: Option<crate::letterboxd::Annotation>,
+
+        // Display title/year from a sidecar JSON, present only when one
+        // overrides what the filename says. Clients show, sort, and bucket by
+        // this when it's here and fall back to parsing `name` when it isn't —
+        // so a library with no sidecars sends exactly the bytes it always did.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        year: Option<u16>,
     },
     File {
         name: String,
@@ -61,6 +71,12 @@ pub enum Entry {
         /// harvested film. Omitted when there's no match.
         #[serde(skip_serializing_if = "Option::is_none")]
         letterboxd: Option<crate::letterboxd::Annotation>,
+
+        // See the matching fields on `Dir`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        year: Option<u16>,
     },
 }
 
@@ -125,21 +141,29 @@ pub async fn browse(
 
     for (name, node) in ordered {
         match node {
-            Node::Dir(d) => entries.push(Entry::Dir {
-                name: name.clone(),
-                children: d.children.len(),
-                mtime: epoch_seconds(d.mtime),
-                poster: d.poster.is_some() || inherited_poster,
-                letterboxd: overlay.annotate(name),
-            }),
+            Node::Dir(d) => {
+                let (title, year) = sidecar_title_year(name, d.meta.as_ref());
+                entries.push(Entry::Dir {
+                    name: name.clone(),
+                    children: d.children.len(),
+                    mtime: epoch_seconds(d.mtime),
+                    poster: d.poster.is_some() || inherited_poster,
+                    letterboxd: annotate_entry(&overlay, name, d.meta.as_ref()),
+                    title,
+                    year,
+                })
+            }
             Node::File(f) => {
+                let (title, year) = sidecar_title_year(name, f.meta.as_ref());
                 entries.push(Entry::File {
                     name: name.clone(),
                     ext: f.ext.clone(),
                     size: f.size,
                     mtime: epoch_seconds(f.mtime),
                     poster: f.poster.is_some() || inherited_poster,
-                    letterboxd: overlay.annotate(name),
+                    letterboxd: annotate_entry(&overlay, name, f.meta.as_ref()),
+                    title,
+                    year,
                 });
             }
         }

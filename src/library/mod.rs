@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub mod scan;
 pub mod watcher;
@@ -18,6 +18,9 @@ pub const SUB_EXTS: &[&str] = &["srt", "vtt", "ass"];
 
 /// Recognised sidecar poster image extensions (always JPEG internally).
 pub const POSTER_EXTS: &[&str] = &["jpg", "jpeg"];
+
+/// Recognised sidecar metadata extensions — see `Meta`.
+pub const META_EXTS: &[&str] = &["json"];
 
 /// One library root, addressed by its virtual name (basename by default).
 #[derive(Debug, Clone)]
@@ -57,6 +60,12 @@ pub struct Dir {
     /// inherit the nearest ancestor directory's poster — see
     /// `Tree::inherited_dir_poster`.
     pub poster: Option<PathBuf>,
+
+    /// Parsed sidecar JSON for a *movie folder*: a sibling `.json` in the
+    /// parent sharing this dir's name, same convention as the dir poster. Lets
+    /// the one-folder-per-movie layout carry a title the same way a bare file
+    /// does.
+    pub meta: Option<Meta>,
 }
 
 impl Default for Dir {
@@ -65,6 +74,7 @@ impl Default for Dir {
             children: BTreeMap::new(),
             mtime: SystemTime::UNIX_EPOCH,
             poster: None,
+            meta: None,
         }
     }
 }
@@ -83,6 +93,33 @@ pub struct File {
     /// if one exists. Served by `/api/poster`; only its presence reaches the
     /// wire (as a `poster: bool` flag on browse/recent file entries).
     pub poster: Option<PathBuf>,
+
+    /// Parsed sidecar JSON (a sibling `.json` sharing the same stem), if one
+    /// exists and parsed. Overrides display title/year and pins the Letterboxd
+    /// match — see `Meta`.
+    pub meta: Option<Meta>,
+}
+
+/// The optional sidecar JSON that can sit next to a movie file or movie folder
+/// (`Birdman (2014).json`, exactly like `Birdman (2014).jpg`). Read once at
+/// scan time and attached to the node it names, so browse/search/recent can
+/// use it without touching the disk per row.
+///
+/// It overrides *presentation* only. The entry's `name` — and therefore its
+/// vpath, playback URL, and focus identity — always stays the real filename,
+/// and `mtime` always stays the video's own. Only the displayed title, the
+/// sort/bucket key, and the Letterboxd correlation come from here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Meta {
+    /// Letterboxd slug (`birdman`) or full film URL. Exact match, beats the
+    /// title/year guesser.
+    pub letterboxd: Option<String>,
+    /// TMDB movie id. Exact match (alternative to `letterboxd`).
+    pub tmdb: Option<u32>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub tagline: Option<String>,
+    pub year: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,6 +281,7 @@ fn clone_dir(d: &Dir) -> Dir {
     let mut out = Dir {
         mtime: d.mtime,
         poster: d.poster.clone(),
+        meta: d.meta.clone(),
         ..Dir::default()
     };
     for (k, v) in &d.children {

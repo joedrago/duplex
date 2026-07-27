@@ -851,7 +851,7 @@ function sortEntries(entries, mode) {
     return [...entries].sort((a, b) => {
         const dm = (b.mtime || 0) - (a.mtime || 0)
         if (dm !== 0) return dm
-        return a.name.localeCompare(b.name)
+        return entryTitle(a).localeCompare(entryTitle(b))
     })
 }
 
@@ -912,7 +912,7 @@ function renderSubdir(path, data) {
     // alphabet rail lands on whatever entry actually starts with a letter
     // instead of skating past a wall of folders. With Recent sort they already
     // interleave by mtime so freshly-added content surfaces regardless of kind.
-    const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => compareByName(a.name, b.name))
+    const ordered = getSort() === "recent" ? sorted : [...sorted].sort((a, b) => compareByName(entryTitle(a), entryTitle(b)))
     // Letterboxd filter (By person / On watchlist), applied over the current
     // listing only. No-op when off.
     const filtered = lbFilter ? ordered.filter(lbFilterPass) : ordered
@@ -1022,7 +1022,7 @@ function makePosterCell(entry, vpath) {
         "div",
         { className: "poster-caption" },
         el("span", { className: "poster-glyph" }, glyph),
-        el("span", { className: "poster-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
+        el("span", { className: "poster-name" }, ...nameParts(entryTitle(entry)))
     )
     // Rating tucked directly under the title.
     const captionCol = el("div", { className: "poster-captioncol" }, caption)
@@ -1032,6 +1032,7 @@ function makePosterCell(entry, vpath) {
     const cell = el("div", { className: "poster-cell" }, link)
     if (isDir) cell.append(bingeButton(vpath))
     cell.dataset.name = entry.name
+    cell.dataset.title = entryTitle(entry)
     return cell
 }
 
@@ -1052,6 +1053,16 @@ function displayName(name) {
     return name.replace(/\.(mp4|mkv)$/i, "")
 }
 
+// What an entry presents as: the sidecar JSON's title when the server sent one,
+// else the filename minus its extension (folders keep their own name). Rows,
+// poster captions, sorting, and the alphabet rail all key off this. `entry.name`
+// stays the real filename, so vpaths, poster URLs, and hrefs are unaffected.
+// Mirrors Entry.displayTitle on tvOS; keep the two in step.
+function entryTitle(entry) {
+    if (entry.title) return entry.year ? entry.title + " (" + entry.year + ")" : entry.title
+    return entry.kind === "dir" ? entry.name : displayName(entry.name)
+}
+
 // Split a trailing parenthetical — "(2006)", "(2006, Theatrical)" — into a dim
 // span so the eye lands on the title proper. Returns an array of children
 // (text + optional span) to spread into a .row-name element.
@@ -1066,7 +1077,7 @@ function makeBrowseRow(entry, vpath) {
     // Selecting a movie opens its Details page; folders browse.
     const href = (isDir ? "#/browse/" : "#/details/") + encodePath(vpath)
     const icon = el("span", { className: "row-icon" }, isDir ? "📁" : "🎬")
-    const name = el("div", { className: "row-name" }, ...nameParts(isDir ? entry.name : displayName(entry.name)))
+    const name = el("div", { className: "row-name" }, ...nameParts(entryTitle(entry)))
     const metaParts = isDir
         ? [`${entry.children} ${entry.children === 1 ? "entry" : "entries"}`]
         : [prettySize(entry.size), entry.ext].filter(Boolean)
@@ -1076,6 +1087,7 @@ function makeBrowseRow(entry, vpath) {
     const row = el("li", { className: "col-row" }, link)
     if (isDir) row.append(bingeButton(vpath))
     row.dataset.name = entry.name
+    row.dataset.title = entryTitle(entry)
     return row
 }
 
@@ -1198,7 +1210,7 @@ async function fetchAndPopulateRecent(col) {
                 "div",
                 { className: "row-text" },
                 parent ? el("div", { className: "row-context" }, parent) : null,
-                el("div", { className: "row-name" }, ...nameParts(isDir ? basename : displayName(basename))),
+                el("div", { className: "row-name" }, ...nameParts(entryTitle(it))),
                 metaWithRating(`${metaLeft} · ${formatRelative(it.mtime)}`, it.letterboxd)
             )
         )
@@ -1355,13 +1367,13 @@ function firstLetterBucket(name) {
 
 function buildAlphabetRail(entries, list) {
     const LETTERS = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
-    const presentSet = new Set(entries.map((e) => firstLetterBucket(e.name)))
+    const presentSet = new Set(entries.map((e) => firstLetterBucket(entryTitle(e))))
     const rail = el("aside", { className: "alphabet-rail", role: "navigation" })
 
     const jumpTo = (letter) => {
         const rows = list.querySelectorAll(".col-row")
         for (const r of rows) {
-            if (firstLetterBucket(r.dataset.name) === letter) {
+            if (firstLetterBucket(r.dataset.title || r.dataset.name) === letter) {
                 r.scrollIntoView({ block: "center", behavior: "smooth" })
                 return
             }
@@ -1544,7 +1556,7 @@ function makeResultRow(item) {
             "div",
             { className: "row-text" },
             parent ? el("div", { className: "row-context" }, parent) : null,
-            el("div", { className: "row-name" }, isDir ? basename : displayName(basename)),
+            el("div", { className: "row-name" }, entryTitle(item)),
             metaWithRating(`${metaLeft} · ${formatRelative(item.mtime)}`, item.letterboxd)
         )
     )

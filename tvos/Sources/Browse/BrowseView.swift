@@ -135,7 +135,7 @@ struct BrowseView: View {
         var seen = Set<String>()
         var ordered: [String] = []
         for entry in sortedEntries {
-            let letter = firstLetter(of: entry.name)
+            let letter = firstLetter(of: entry.displayTitle)
             if seen.insert(letter).inserted {
                 ordered.append(letter)
             }
@@ -252,19 +252,21 @@ struct BrowseView: View {
     @ViewBuilder
     private func posterCell(for entry: Entry) -> some View {
         let isFocused = focusedKey == .entry(entry.name)
+        let rating = entry.letterboxd?.compactRating
         switch entry {
-        case .dir(let name, _, _, let hasPoster):
+        case .dir(let name, _, _, let hasPoster, _, _):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: subpath(name), cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "📁",
-                title: name,
+                title: entry.displayTitle,
                 isFocused: isFocused
             )
-        case .file(let name, _, _, _, let hasPoster):
+        case .file(let name, _, _, _, let hasPoster, _, _):
             PosterCell(
                 url: hasPoster ? client.posterURL(path: subpath(name), cacheBust: refresh.posterNonce) : nil,
                 fallbackGlyph: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: entry.displayTitle,
+                rating: rating,
                 isFocused: isFocused
             )
         }
@@ -341,25 +343,28 @@ struct BrowseView: View {
     @ViewBuilder
     private func row(for entry: Entry) -> some View {
         let isFocused = focusedKey == .entry(entry.name)
+        let rating = entry.letterboxd?.compactRating
         switch entry {
-        case .dir(let name, let children, let mtime, _):
+        case .dir(_, let children, let mtime, _, _, _):
             GridEntryRow(
                 icon: "📁",
-                title: name,
+                title: entry.displayTitle,
                 subtitle: nil,
                 meta: viewPref.sort == .recent
                     ? "\(children) · \(DuplexFormat.relative(mtime))"
                     : "\(children) entries",
+                rating: rating,
                 isFocused: isFocused
             )
-        case .file(let name, _, let size, let mtime, _):
+        case .file(_, _, let size, let mtime, _, _, _):
             GridEntryRow(
                 icon: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: entry.displayTitle,
                 subtitle: nil,
                 meta: viewPref.sort == .recent
                     ? "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))"
                     : DuplexFormat.size(size),
+                rating: rating,
                 isFocused: isFocused
             )
         }
@@ -391,7 +396,9 @@ struct BrowseView: View {
         }
         switch (current, dir) {
         case (.entry(let name), .right):
-            let letter = firstLetter(of: name)
+            // Bucket by the shown title, matching how the rail was built.
+            guard let entry = sortedEntries.first(where: { $0.name == name }) else { return nil }
+            let letter = firstLetter(of: entry.displayTitle)
             return availableLetters.contains(letter) ? .letter(letter) : nil
         case (.letter, .left):
             guard let name = lastEntryFocus, sortedEntryNames.contains(name) else { return nil }
@@ -407,13 +414,13 @@ struct BrowseView: View {
             guard let entry = sortedEntries.first(where: { $0.name == name }) else { return }
             switch entry {
             case .dir:  nav.push(.browse(path: subpath(name)))
-            case .file: nav.play(vpath: subpath(name))
+            case .file: nav.push(.details(vpath: subpath(name)))
             }
         case .letter(let letter):
             // Jump to (and put focus back on) the first entry that lives under
             // this letter. The list's `onChange(of: focusedKey)` scrolls the
             // matched row to center.
-            if let target = sortedEntries.first(where: { firstLetter(of: $0.name) == letter }) {
+            if let target = sortedEntries.first(where: { firstLetter(of: $0.displayTitle) == letter }) {
                 focusedKey = .entry(target.name)
             }
         }
@@ -485,12 +492,16 @@ struct BrowseView: View {
             // Compare on the article-stripped key, then fall back to the full
             // name so "Matrix" vs "The Matrix" has a stable, defined order
             // (Swift's sort isn't stable and needs a strict weak ordering).
+            // Sorted by the title on screen, not the filename behind it: a
+            // sidecar that renames `tt0088763.mkv` to "Back to the Future"
+            // files it under B, where the user will look for it.
             return entries.sorted { a, b in
-                switch DuplexFormat.sortName(a.name)
-                    .localizedCaseInsensitiveCompare(DuplexFormat.sortName(b.name)) {
+                switch DuplexFormat.sortName(a.displayTitle)
+                    .localizedCaseInsensitiveCompare(DuplexFormat.sortName(b.displayTitle)) {
                 case .orderedAscending:  return true
                 case .orderedDescending: return false
-                case .orderedSame:       return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                case .orderedSame:
+                    return a.displayTitle.localizedCaseInsensitiveCompare(b.displayTitle) == .orderedAscending
                 }
             }
         case .recent:

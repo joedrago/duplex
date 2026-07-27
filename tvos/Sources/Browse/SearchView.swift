@@ -206,20 +206,21 @@ struct SearchView: View {
         let parent = DuplexFormat.parent(of: item.vpath)
         let isFocused = focusedKey == .result(item.vpath)
         switch item {
-        case .dir(let name, _, let mtime, let children):
+        case .dir(_, _, let mtime, let children, _, _):
             GridEntryRow(
                 icon: "📁",
-                title: name,
+                title: item.displayTitle,
                 subtitle: parent.isEmpty ? nil : parent,
                 meta: "\(children) · \(DuplexFormat.relative(mtime))",
                 isFocused: isFocused
             )
-        case .file(let name, _, let mtime, let size):
+        case .file(_, _, let mtime, let size, _, _):
             GridEntryRow(
                 icon: "🎬",
-                title: DuplexFormat.displayFileName(name),
+                title: item.displayTitle,
                 subtitle: parent.isEmpty ? nil : parent,
                 meta: "\(DuplexFormat.size(size)) · \(DuplexFormat.relative(mtime))",
+                rating: item.letterboxd?.compactRating,
                 isFocused: isFocused
             )
         }
@@ -265,7 +266,7 @@ struct SearchView: View {
             guard let item = session.results.first(where: { $0.vpath == vpath }) else { return }
             switch item {
             case .dir:  nav.push(.browse(path: vpath))
-            case .file: nav.play(vpath: vpath)
+            case .file: nav.push(.details(vpath: vpath))
             }
         }
     }

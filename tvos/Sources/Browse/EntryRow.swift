@@ -16,11 +16,12 @@ struct EntryRow: View {
     let title: String
     let subtitle: String?
     let meta: String?
+    var rating: String? = nil
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            EntryRowLabel(icon: icon, title: title, subtitle: subtitle, meta: meta)
+            EntryRowLabel(icon: icon, title: title, subtitle: subtitle, meta: meta, rating: rating)
         }
         .buttonStyle(EntryRowButtonStyle())
     }
@@ -31,6 +32,8 @@ struct EntryRowLabel: View {
     let title: String
     let subtitle: String?
     let meta: String?
+    /// Optional Letterboxd rating, shown in gold right after the meta.
+    var rating: String? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
@@ -51,11 +54,21 @@ struct EntryRowLabel: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if let meta, !meta.isEmpty {
-                Text(meta)
-                    .font(.system(size: 16, weight: .regular).monospacedDigit())
-                    .foregroundStyle(DuplexColor.muted)
-                    .lineLimit(1)
+            if (meta.map { !$0.isEmpty } ?? false) || (rating.map { !$0.isEmpty } ?? false) {
+                HStack(spacing: 10) {
+                    if let meta, !meta.isEmpty {
+                        Text(meta)
+                            .font(.system(size: 16, weight: .regular).monospacedDigit())
+                            .foregroundStyle(DuplexColor.muted)
+                            .lineLimit(1)
+                    }
+                    if let rating, !rating.isEmpty {
+                        Text(rating)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(DuplexColor.accent)
+                            .lineLimit(1)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

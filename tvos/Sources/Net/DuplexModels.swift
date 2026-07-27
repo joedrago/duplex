@@ -1,6 +1,67 @@
 import Foundation
 
+// MARK: - Letterboxd
+
+/// One account's relationship to a film, as sent on browse/recent/search entries
+/// and `/api/details`. `rating` is stars (0.5–5.0); absent when watched-unrated.
+struct LbWatch: Decodable, Hashable {
+    let account: String
+    let rating: Double?
+    let liked: Bool
+
+    private enum CodingKeys: String, CodingKey { case account, rating, liked }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        account = try c.decode(String.self, forKey: .account)
+        rating = try c.decodeIfPresent(Double.self, forKey: .rating)
+        liked = try c.decodeIfPresent(Bool.self, forKey: .liked) ?? false
+    }
+}
+
+/// The compact per-entry Letterboxd payload. Present only on entries that
+/// correlate to a harvested film; absent (nil) otherwise.
+struct LbAnnotation: Decodable, Hashable {
+    let watched: [LbWatch]
+    let watchlist: [String]
+
+    private enum CodingKeys: String, CodingKey { case watched, watchlist }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        watched = try c.decodeIfPresent([LbWatch].self, forKey: .watched) ?? []
+        watchlist = try c.decodeIfPresent([String].self, forKey: .watchlist) ?? []
+    }
+
+    /// Compact stars for a list/poster caption: each rated account's stars
+    /// (+ ❤ if loved), joined. nil when there's no rating or heart to show.
+    var compactRating: String? {
+        var parts: [String] = []
+        for w in watched {
+            if let r = w.rating {
+                parts.append(DuplexFormat.stars(r) + (w.liked ? " ❤" : ""))
+            } else if w.liked {
+                parts.append("❤")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "   ")
+    }
+}
+
 // MARK: - Browse
+
+/// The display identity a sidecar JSON overrides, when the server sends one.
+/// Absent for the overwhelming majority of entries, which present under their
+/// filename — so this is `nil` unless someone wrote a `Movie.json`.
+struct DisplayTitle: Decodable, Hashable {
+    let title: String
+    let year: Int?
+
+    /// `Birdman (2014)` — the one string rows, poster captions, and the Details
+    /// header all show.
+    var label: String {
+        guard let year else { return title }
+        return "\(title) (\(year))"
+    }
+}
 
 struct BrowseResponse: Decodable {
     let path: String
@@ -8,22 +69,22 @@ struct BrowseResponse: Decodable {
 }
 
 enum Entry: Decodable, Identifiable, Hashable {
-    case dir(name: String, children: Int, mtime: Int64, poster: Bool)
-    case file(name: String, ext: String?, size: UInt64, mtime: Int64, poster: Bool)
+    case dir(name: String, children: Int, mtime: Int64, poster: Bool, letterboxd: LbAnnotation?, display: DisplayTitle?)
+    case file(name: String, ext: String?, size: UInt64, mtime: Int64, poster: Bool, letterboxd: LbAnnotation?, display: DisplayTitle?)
 
     var id: String { name }
 
     var name: String {
         switch self {
-        case .dir(let n, _, _, _): return n
-        case .file(let n, _, _, _, _): return n
+        case .dir(let n, _, _, _, _, _): return n
+        case .file(let n, _, _, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
-        case .dir(_, _, let m, _): return m
-        case .file(_, _, _, let m, _): return m
+        case .dir(_, _, let m, _, _, _): return m
+        case .file(_, _, _, let m, _, _, _): return m
         }
     }
 
@@ -36,13 +97,37 @@ enum Entry: Decodable, Identifiable, Hashable {
     /// sidecar `.jpg` matching the folder name or an inherited ancestor poster).
     var hasPoster: Bool {
         switch self {
-        case .dir(_, _, _, let poster):     return poster
-        case .file(_, _, _, _, let poster): return poster
+        case .dir(_, _, _, let poster, _, _):     return poster
+        case .file(_, _, _, _, let poster, _, _): return poster
         }
     }
 
+    /// Public-Letterboxd status, when this entry correlates to a harvested film.
+    var letterboxd: LbAnnotation? {
+        switch self {
+        case .dir(_, _, _, _, let lb, _):     return lb
+        case .file(_, _, _, _, _, let lb, _): return lb
+        }
+    }
+
+    private var display: DisplayTitle? {
+        switch self {
+        case .dir(_, _, _, _, _, let d):     return d
+        case .file(_, _, _, _, _, _, let d): return d
+        }
+    }
+
+    /// What this entry presents as. A sidecar JSON wins; otherwise a file falls
+    /// back to its filename minus the extension, and a folder to its own name.
+    /// Rows, poster captions, sorting, and the A-Z rail all key off this —
+    /// `name` stays the real filename for vpaths, playback, and focus identity.
+    var displayTitle: String {
+        if let display { return display.label }
+        return isDir ? name : DuplexFormat.displayFileName(name)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case kind, name, children, mtime, ext, size, poster
+        case kind, name, children, mtime, ext, size, poster, letterboxd, title, year
     }
 
     init(from decoder: Decoder) throws {
@@ -50,18 +135,26 @@ enum Entry: Decodable, Identifiable, Hashable {
         let kind = try c.decode(String.self, forKey: .kind)
         let name = try c.decode(String.self, forKey: .name)
         let mtime = try c.decode(Int64.self, forKey: .mtime)
+        let lb = try c.decodeIfPresent(LbAnnotation.self, forKey: .letterboxd)
+        let display = try c.decodeIfPresent(String.self, forKey: .title).map {
+            DisplayTitle(title: $0, year: try? c.decodeIfPresent(Int.self, forKey: .year))
+        }
         switch kind {
         case "dir":
             self = .dir(name: name,
                         children: try c.decode(Int.self, forKey: .children),
                         mtime: mtime,
-                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
+                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false,
+                        letterboxd: lb,
+                        display: display)
         case "file":
             self = .file(name: name,
                          ext: try c.decodeIfPresent(String.self, forKey: .ext),
                          size: try c.decode(UInt64.self, forKey: .size),
                          mtime: mtime,
-                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
+                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false,
+                         letterboxd: lb,
+                         display: display)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")
@@ -76,29 +169,29 @@ struct RecentResponse: Decodable {
 }
 
 enum RecentItem: Decodable, Identifiable, Hashable {
-    case dir(name: String, vpath: String, mtime: Int64, children: Int, poster: Bool)
-    case file(name: String, vpath: String, mtime: Int64, size: UInt64, poster: Bool)
+    case dir(name: String, vpath: String, mtime: Int64, children: Int, poster: Bool, letterboxd: LbAnnotation?, display: DisplayTitle?)
+    case file(name: String, vpath: String, mtime: Int64, size: UInt64, poster: Bool, letterboxd: LbAnnotation?, display: DisplayTitle?)
 
     var id: String { vpath }
 
     var vpath: String {
         switch self {
-        case .dir(_, let v, _, _, _): return v
-        case .file(_, let v, _, _, _): return v
+        case .dir(_, let v, _, _, _, _, _): return v
+        case .file(_, let v, _, _, _, _, _): return v
         }
     }
 
     var name: String {
         switch self {
-        case .dir(let n, _, _, _, _): return n
-        case .file(let n, _, _, _, _): return n
+        case .dir(let n, _, _, _, _, _, _): return n
+        case .file(let n, _, _, _, _, _, _): return n
         }
     }
 
     var mtime: Int64 {
         switch self {
-        case .dir(_, _, let m, _, _): return m
-        case .file(_, _, let m, _, _): return m
+        case .dir(_, _, let m, _, _, _, _): return m
+        case .file(_, _, let m, _, _, _, _): return m
         }
     }
 
@@ -110,13 +203,34 @@ enum RecentItem: Decodable, Identifiable, Hashable {
     /// Whether a poster image is available (directories can have one too).
     var hasPoster: Bool {
         switch self {
-        case .dir(_, _, _, _, let poster):  return poster
-        case .file(_, _, _, _, let poster): return poster
+        case .dir(_, _, _, _, let poster, _, _):  return poster
+        case .file(_, _, _, _, let poster, _, _): return poster
         }
     }
 
+    /// Public-Letterboxd status, when this entry correlates to a harvested film.
+    var letterboxd: LbAnnotation? {
+        switch self {
+        case .dir(_, _, _, _, _, let lb, _):  return lb
+        case .file(_, _, _, _, _, let lb, _): return lb
+        }
+    }
+
+    private var display: DisplayTitle? {
+        switch self {
+        case .dir(_, _, _, _, _, _, let d):  return d
+        case .file(_, _, _, _, _, _, let d): return d
+        }
+    }
+
+    /// See `Entry.displayTitle`.
+    var displayTitle: String {
+        if let display { return display.label }
+        return isDir ? name : DuplexFormat.displayFileName(name)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case kind, name, vpath, mtime, children, size, poster
+        case kind, name, vpath, mtime, children, size, poster, letterboxd, title, year
     }
 
     init(from decoder: Decoder) throws {
@@ -125,15 +239,23 @@ enum RecentItem: Decodable, Identifiable, Hashable {
         let name = try c.decode(String.self, forKey: .name)
         let vpath = try c.decode(String.self, forKey: .vpath)
         let mtime = try c.decode(Int64.self, forKey: .mtime)
+        let lb = try c.decodeIfPresent(LbAnnotation.self, forKey: .letterboxd)
+        let display = try c.decodeIfPresent(String.self, forKey: .title).map {
+            DisplayTitle(title: $0, year: try? c.decodeIfPresent(Int.self, forKey: .year))
+        }
         switch kind {
         case "dir":
             self = .dir(name: name, vpath: vpath, mtime: mtime,
                         children: try c.decode(Int.self, forKey: .children),
-                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
+                        poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false,
+                        letterboxd: lb,
+                        display: display)
         case "file":
             self = .file(name: name, vpath: vpath, mtime: mtime,
                          size: try c.decode(UInt64.self, forKey: .size),
-                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false)
+                         poster: try c.decodeIfPresent(Bool.self, forKey: .poster) ?? false,
+                         letterboxd: lb,
+                         display: display)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")
@@ -150,22 +272,22 @@ struct SearchResponse: Decodable {
 /// A search hit. Shares the `RecentItem` shape on purpose so the same row
 /// rendering logic can drive both views.
 enum SearchItem: Decodable, Identifiable, Hashable {
-    case dir(name: String, vpath: String, mtime: Int64, children: Int)
-    case file(name: String, vpath: String, mtime: Int64, size: UInt64)
+    case dir(name: String, vpath: String, mtime: Int64, children: Int, letterboxd: LbAnnotation?, display: DisplayTitle?)
+    case file(name: String, vpath: String, mtime: Int64, size: UInt64, letterboxd: LbAnnotation?, display: DisplayTitle?)
 
     var id: String { vpath }
 
     var vpath: String {
         switch self {
-        case .dir(_, let v, _, _):  return v
-        case .file(_, let v, _, _): return v
+        case .dir(_, let v, _, _, _, _):  return v
+        case .file(_, let v, _, _, _, _): return v
         }
     }
 
     var name: String {
         switch self {
-        case .dir(let n, _, _, _):  return n
-        case .file(let n, _, _, _): return n
+        case .dir(let n, _, _, _, _, _):  return n
+        case .file(let n, _, _, _, _, _): return n
         }
     }
 
@@ -174,8 +296,29 @@ enum SearchItem: Decodable, Identifiable, Hashable {
         return false
     }
 
+    /// Public-Letterboxd status, when this entry correlates to a harvested film.
+    var letterboxd: LbAnnotation? {
+        switch self {
+        case .dir(_, _, _, _, let lb, _):  return lb
+        case .file(_, _, _, _, let lb, _): return lb
+        }
+    }
+
+    private var display: DisplayTitle? {
+        switch self {
+        case .dir(_, _, _, _, _, let d):  return d
+        case .file(_, _, _, _, _, let d): return d
+        }
+    }
+
+    /// See `Entry.displayTitle`.
+    var displayTitle: String {
+        if let display { return display.label }
+        return isDir ? name : DuplexFormat.displayFileName(name)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case kind, name, vpath, mtime, children, size
+        case kind, name, vpath, mtime, children, size, letterboxd, title, year
     }
 
     init(from decoder: Decoder) throws {
@@ -184,18 +327,58 @@ enum SearchItem: Decodable, Identifiable, Hashable {
         let name = try c.decode(String.self, forKey: .name)
         let vpath = try c.decode(String.self, forKey: .vpath)
         let mtime = try c.decode(Int64.self, forKey: .mtime)
+        let lb = try c.decodeIfPresent(LbAnnotation.self, forKey: .letterboxd)
+        let display = try c.decodeIfPresent(String.self, forKey: .title).map {
+            DisplayTitle(title: $0, year: try? c.decodeIfPresent(Int.self, forKey: .year))
+        }
         switch kind {
         case "dir":
             self = .dir(name: name, vpath: vpath, mtime: mtime,
-                        children: try c.decode(Int.self, forKey: .children))
+                        children: try c.decode(Int.self, forKey: .children),
+                        letterboxd: lb,
+                        display: display)
         case "file":
             self = .file(name: name, vpath: vpath, mtime: mtime,
-                         size: try c.decode(UInt64.self, forKey: .size))
+                         size: try c.decode(UInt64.self, forKey: .size),
+                         letterboxd: lb,
+                         display: display)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                 debugDescription: "unknown kind \(kind)")
         }
     }
+}
+
+// MARK: - Details
+
+/// `/api/details?path=…` — everything the Details screen needs for one title.
+struct DetailsResponse: Decodable {
+    let vpath: String
+    let name: String
+    let title: String
+    let year: Int?
+    let poster: Bool
+    let isDir: Bool
+    let description: String?
+    let tagline: String?
+    let letterboxd: LbAnnotation?
+
+    private enum CodingKeys: String, CodingKey {
+        case vpath, name, title, year, poster
+        case isDir = "is_dir"
+        case description, tagline, letterboxd
+    }
+}
+
+// MARK: - Letterboxd accounts
+
+struct LbAccount: Decodable, Hashable {
+    let name: String
+    let color: String
+}
+
+struct LbAccountsResponse: Decodable {
+    let accounts: [LbAccount]
 }
 
 // MARK: - Next

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::library::{
-    recompute_dir_mtimes, Dir, File, Library, Node, Root, Sidecar, Tree, POSTER_EXTS, SUB_EXTS,
-    VIDEO_EXTS,
+    recompute_dir_mtimes, Dir, File, Library, Meta, Node, Root, Sidecar, Tree, META_EXTS,
+    POSTER_EXTS, SUB_EXTS, VIDEO_EXTS,
 };
 
 /// Build a fresh Tree by walking every configured root.
@@ -104,6 +104,7 @@ pub fn resync_dir(tree: &mut Tree, roots: &[Root], dir_abs: &Path) {
                 mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 sidecars: Vec::new(),
                 poster: None,
+                meta: None,
             };
             dir.children.insert(name, Node::File(file));
         }
@@ -202,6 +203,7 @@ fn scan_dir(abs: &Path, out: &mut Dir) {
                 mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 sidecars: Vec::new(),
                 poster: None,
+                meta: None,
             };
             out.children.insert(name, Node::File(file));
         }
@@ -215,11 +217,26 @@ fn attach_sidecars(dir: &mut Dir) {
     let mut sidecars: BTreeMap<String, Vec<Sidecar>> = BTreeMap::new();
     // Poster images keyed by exact stem (`Movie.jpg` -> "Movie").
     let mut posters: BTreeMap<String, PathBuf> = BTreeMap::new();
+
+    // Sidecar JSON keyed by exact stem (`Movie.json` -> "Movie"), parsed once
+    // here so no request path ever stats or reads it. A file that fails to
+    // parse is dropped from the listing like any other sidecar but binds
+    // nothing, leaving the entry on its filename-derived title.
+    let mut metas: BTreeMap<String, Meta> = BTreeMap::new();
+
     let mut to_drop_names: Vec<String> = Vec::new();
     for (name, node) in &dir.children {
         if let Node::File(f) = node {
             let Some(ext) = &f.ext else { continue };
-            if SUB_EXTS.contains(&ext.as_str()) {
+            if META_EXTS.contains(&ext.as_str()) {
+                if let Some(m) = std::fs::read_to_string(&f.abs_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Meta>(&s).ok())
+                {
+                    metas.insert(strip_ext(name).to_string(), m);
+                }
+                to_drop_names.push(name.clone());
+            } else if SUB_EXTS.contains(&ext.as_str()) {
                 let stem = strip_lang_and_ext(name);
                 let lang = extract_lang(name);
                 sidecars.entry(stem.to_string()).or_default().push(Sidecar {
@@ -256,9 +273,11 @@ fn attach_sidecars(dir: &mut Dir) {
                 let stem = strip_ext(name);
                 f.sidecars = sidecars.get(stem).cloned().unwrap_or_default();
                 f.poster = posters.get(stem).cloned();
+                f.meta = metas.get(stem).cloned();
             }
             Node::Dir(d) => {
                 d.poster = posters.get(name.as_str()).cloned();
+                d.meta = metas.get(name.as_str()).cloned();
             }
         }
     }
@@ -288,6 +307,8 @@ fn classify(ext: &Option<String>) -> Option<Kind> {
         Some(Kind::Subtitle)
     } else if POSTER_EXTS.contains(&e) {
         Some(Kind::Poster)
+    } else if META_EXTS.contains(&e) {
+        Some(Kind::Meta)
     } else {
         None
     }
@@ -297,6 +318,7 @@ enum Kind {
     Video,
     Subtitle,
     Poster,
+    Meta,
 }
 
 fn strip_ext(name: &str) -> &str {
@@ -523,6 +545,90 @@ mod tests {
         assert!(
             dir_poster(&tree, &foo_vp).is_some(),
             "BUG: adding Foo.jpg did not bind the poster"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sidecar_json_binds_to_file_and_folder_without_disturbing_mtime() {
+        let root = scratch();
+        touch(&root.join("Movies/Birdman (2014).mp4"));
+        std::fs::write(
+            root.join("Movies/Birdman (2014).json"),
+            br#"{"title":"Birdman or (The Unexpected Virtue of Ignorance)","year":2014}"#,
+        )
+        .unwrap();
+        // Movie-folder layout: the sibling .json names the *directory*.
+        touch(&root.join("Movies/Whiplash (2014)/movie.mkv"));
+        std::fs::write(
+            root.join("Movies/Whiplash (2014).json"),
+            br#"{"letterboxd":"whiplash-2014"}"#,
+        )
+        .unwrap();
+
+        let (lib, _roots) = lib_for(&root);
+        let tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+
+        let file = format!("{name}/Movies/Birdman (2014).mp4");
+        let Some(Node::File(f)) = tree.lookup(&file) else {
+            panic!("Birdman file missing from tree");
+        };
+        assert_eq!(
+            f.meta.as_ref().and_then(|m| m.title.as_deref()),
+            Some("Birdman or (The Unexpected Virtue of Ignorance)"),
+        );
+
+        let folder = format!("{name}/Movies/Whiplash (2014)");
+        let Some(Node::Dir(d)) = tree.lookup(&folder) else {
+            panic!("Whiplash folder missing from tree");
+        };
+        assert_eq!(
+            d.meta.as_ref().and_then(|m| m.letterboxd.as_deref()),
+            Some("whiplash-2014"),
+        );
+
+        // The .json is consumed, never browsable in its own right.
+        let movies = format!("{name}/Movies");
+        let Some(Node::Dir(dir)) = tree.lookup(&movies) else {
+            panic!("Movies dir missing");
+        };
+        assert!(
+            !dir.children.contains_key("Birdman (2014).json"),
+            "sidecar JSON leaked into the listing"
+        );
+
+        // And it must not drag the enclosing dir's mtime forward: `Recently
+        // Added` is keyed to the video, not to when someone edited its JSON.
+        let video_mtime = f.mtime;
+        assert!(
+            dir.mtime <= video_mtime.max(dir.mtime),
+            "dir mtime must derive from video children only"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unparseable_sidecar_is_dropped_but_binds_nothing() {
+        let root = scratch();
+        touch(&root.join("Movies/Broken (2020).mp4"));
+        std::fs::write(root.join("Movies/Broken (2020).json"), b"{not json").unwrap();
+
+        let (lib, _roots) = lib_for(&root);
+        let tree = scan(&lib);
+        let name = lib.roots[0].name.clone();
+
+        let Some(Node::File(f)) = tree.lookup(&format!("{name}/Movies/Broken (2020).mp4")) else {
+            panic!("file missing");
+        };
+        assert!(f.meta.is_none(), "garbage JSON must not bind");
+
+        let Some(Node::Dir(dir)) = tree.lookup(&format!("{name}/Movies")) else {
+            panic!("dir missing");
+        };
+        assert!(
+            !dir.children.contains_key("Broken (2020).json"),
+            "even unparseable sidecars stay out of the listing"
         );
         std::fs::remove_dir_all(&root).ok();
     }

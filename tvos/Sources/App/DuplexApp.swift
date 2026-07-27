@@ -111,6 +111,7 @@ final class NavCoordinator: ObservableObject {
 
 enum NavDestination: Hashable {
     case browse(path: String)
+    case details(vpath: String)
     case player(vpath: String, bingeId: String?)
     case bingeChooser(vpath: String)
     case settings
@@ -121,6 +122,8 @@ enum NavDestination: Hashable {
         switch self {
         case .browse(let path):
             BrowseView(dirPath: path)
+        case .details(let vpath):
+            DetailsView(vpath: vpath)
         case .player(let vpath, let bingeId):
             // .id(vpath) so that hopping from .player(A) directly to .player(B)
             // (Continue/Done flow) tears down PlayerView A entirely and builds

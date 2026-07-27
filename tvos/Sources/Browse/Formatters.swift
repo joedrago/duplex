@@ -22,6 +22,13 @@ enum DuplexFormat {
         return df.string(from: then)
     }
 
+    /// A star rating (0.5–5.0) as ★/½ glyphs. `4.5` → "★★★★½".
+    static func stars(_ rating: Double) -> String {
+        let full = Int(rating)
+        let half = rating - Double(full) >= 0.5
+        return String(repeating: "★", count: full) + (half ? "½" : "")
+    }
+
     static func time(_ seconds: Double) -> String {
         let s = Int(seconds.rounded())
         let h = s / 3600
